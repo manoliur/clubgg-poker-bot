@@ -1,0 +1,31 @@
+{
+  "_comment": "Состояние текущей игровой сессии. Обновляется по ходу игры.",
+  "serial": "1cf5db29",
+  "table": {
+    "type": "cash",
+    "game": "NLH",
+    "blinds": [
+      15,
+      30
+    ],
+    "hero_name": "Robert Nikson",
+    "hero_seat": 81,
+    "hero_stack_bb": 69.6,
+    "opponents": []
+  },
+  "current_hand": {
+    "hand_id": null,
+    "street": "paused",
+    "hole_cards": null,
+    "board": [],
+    "pot": 0,
+    "to_call": 0,
+    "min_raise": 0,
+    "action_buttons": []
+  },
+  "stats": {
+    "hands_played": 0,
+    "wins": 0,
+    "total_bb": 0.0
+  }
+}
