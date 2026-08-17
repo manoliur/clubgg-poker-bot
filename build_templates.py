@@ -7,6 +7,10 @@
 Разметка берётся из labels.json (если есть) либо из встроенного списка KNOWN:
     [{"file": "shots/turn_191709.png", "zone": "board", "cards": ["4h","3s","Kc"]}, ...]
 
+Цифры (для чтения банка и суммы колла) собираются из записей вида:
+    {"file": "shots/x.png", "rect": [0.35,0.86,0.65,0.99], "text": "2.5", "ink": "yellow"}
+Глифы в прямоугольнике сортируются слева направо и сопоставляются символам text.
+
 Запуск:  python build_templates.py [labels.json]
 """
 import os
@@ -34,7 +38,7 @@ KNOWN = [
 def collect(labels, base=None, tpl_dir=None, verbose=True):
     """Собрать эталоны. Возвращает (сколько_рангов, сколько_мастей, пропуски)."""
     base = base or config.BASE
-    acc_rank, acc_suit = {}, {}
+    acc_rank, acc_suit, acc_digit = {}, {}, {}
     skipped = []
     for item in labels:
         path = item['file']
@@ -43,6 +47,11 @@ def collect(labels, base=None, tpl_dir=None, verbose=True):
         img = cv2.imread(path)
         if img is None:
             skipped.append(f'{item["file"]}: не читается')
+            continue
+        if 'text' in item:
+            err = _collect_digits(img, item, acc_digit)
+            if err:
+                skipped.append(f'{item["file"]}: {err}')
             continue
         boxes = find_board_cards(img) if item['zone'] == 'board' else my_card_boxes(img)
         if len(boxes) < len(item['cards']):
@@ -66,7 +75,11 @@ def collect(labels, base=None, tpl_dir=None, verbose=True):
         save_template(f'rank_{rank}', _average(imgs), tpl_dir)
     for suit, imgs in acc_suit.items():
         save_template(f'suit_{suit}', _average(imgs), tpl_dir)
+    for ch, imgs in acc_digit.items():
+        save_template(f'digit_{ch}', _average(imgs), tpl_dir)
 
+    if acc_digit and verbose:
+        print('цифры:', sorted(acc_digit))
     if verbose:
         print(f'\nЭталоны: ранги {sorted(acc_rank)} ({len(acc_rank)}), '
               f'масти {sorted(acc_suit)} ({len(acc_suit)})')
@@ -79,6 +92,19 @@ def collect(labels, base=None, tpl_dir=None, verbose=True):
         for s in skipped:
             print('пропуск:', s)
     return len(acc_rank), len(acc_suit), skipped
+
+
+def _collect_digits(img, item, acc):
+    """Эталоны цифр из прямоугольника с известным текстом ('2.5', '15 BB')."""
+    from table_state import segment_text_glyphs   # локальный импорт: избегаем цикла
+    glyphs = segment_text_glyphs(img, item['rect'], ink=item.get('ink', 'yellow'))
+    text = [c for c in item['text'] if not c.isspace()]
+    if len(glyphs) != len(text):
+        return f'глифов {len(glyphs)} != символов {len(text)} в "{item["text"]}"'
+    for (_, gimg), ch in zip(glyphs, text):
+        key = 'dot' if ch in '.,' else ch
+        acc.setdefault(key, []).append(gimg)
+    return None
 
 
 def _average(imgs):
