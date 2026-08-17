@@ -107,12 +107,6 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
         cv2.putText(img, f'Obshiy bank {pot_bb} BB', (int(W * 0.28), int(H * 0.355)),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.1, YELLOW, 3)
 
-    # доска
-    board = board or []
-    for i, card in enumerate(board):
-        x = BOARD_X0 + i * (BOARD_CARD[0] + BOARD_GAP)
-        draw_card(img, x, BOARD_Y, BOARD_CARD[0], BOARD_CARD[1], card)
-
     # мои карты веером (перекрываются -> контур слипается)
     hole = hole or []
     for i, card in enumerate(hole[:2]):
@@ -130,6 +124,13 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
     hx0, hy0, hx1, hy1 = config.zone_px(config.HERO_SEAT, W, H)
     _rounded_rect(img, hx0, hy0, hx1, hy1, PANEL, r=14)
     cv2.circle(img, (hx0 + (hy1 - hy0) // 2, (hy0 + hy1) // 2), (hy1 - hy0) // 3, (150, 140, 130), -1)
+
+    # доска — поверх панелей: на реальном столе карты лежат на сукне и панели
+    # игроков их не закрывают (крайние места у config.SEATS заходят на зону доски)
+    board = board or []
+    for i, card in enumerate(board):
+        x = BOARD_X0 + i * (BOARD_CARD[0] + BOARD_GAP)
+        draw_card(img, x, BOARD_Y, BOARD_CARD[0], BOARD_CARD[1], card)
 
     # кнопка D
     if dealer == 'me':

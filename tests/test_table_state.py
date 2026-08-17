@@ -167,6 +167,23 @@ class ReadStateTest(unittest.TestCase):
         self.assertEqual(s['players'], 6)
         self.assertEqual(s['position'], 'BTN')
 
+    def test_full_board_read_at_six_max(self):
+        """Панели игроков по краям заходят на зону доски — карты всё равно читаются."""
+        for board in (['6d', '5h', 'As'], ['6d', '5h', 'As', '9c', 'Qc']):
+            s = self.state(hole=['Ah', 'Kd'], board=board, players=6, dealer='opp')
+            self.assertEqual(s['board'], board)
+            self.assertEqual(s['street'], {3: 'flop', 5: 'river'}[len(board)])
+
+    def test_board_cards_do_not_add_players(self):
+        """Карты доски заходят на крайние места — считать их игроками нельзя."""
+        for board in ([], ['6d', '5h', 'As'], ['6d', '5h', 'As', '9c', 'Qc']):
+            s = self.state(hole=['Ah', 'Kd'], board=board, players=6, dealer='opp')
+            self.assertEqual(s['players'], 6, board)
+
+    def test_hero_has_cards(self):
+        self.assertTrue(ts.hero_has_cards(synth.render(hole=['Ah', 'Kd'])))
+        self.assertFalse(ts.hero_has_cards(synth.render(hole=[])))
+
 
 class NumberReadingTest(unittest.TestCase):
     """Чтение чисел работает после сбора эталонов цифр (жёлтый текст)."""

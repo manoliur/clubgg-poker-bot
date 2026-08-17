@@ -104,6 +104,15 @@ def is_my_turn(img):
     return len(detect_action_buttons(img)) >= 1
 
 
+def hero_has_cards(img):
+    """Есть ли у героя карманные карты (он в раздаче).
+
+    Важно для игрового цикла: кнопки внизу могут появиться от анимации или чужого
+    хода, а тапать, не будучи в раздаче, нельзя.
+    """
+    return len(card_reader.my_card_boxes(img)) >= 1
+
+
 def has_bet(img):
     """Жёлтая сумма на кнопке колла = оппонент поставил, чек недоступен."""
     H, W = img.shape[:2]
@@ -187,10 +196,19 @@ def felt_color(img):
     return np.median(patch.reshape(-1, 3), axis=0)
 
 
-def seat_occupancy(img):
-    """Доля «не сукна» в каждом месте: список float (0..1) по config.SEATS."""
+def seat_occupancy(img, exclude=None):
+    """Доля «не сукна» в каждом месте: список float (0..1) по config.SEATS.
+
+    Крайние места из config.SEATS заходят на зону доски, поэтому карты доски
+    (exclude — их боксы, по умолчанию найденные на кадре) из подсчёта исключаются:
+    иначе белая карта читается как «место занято» и игроков выходит больше.
+    """
     H, W = img.shape[:2]
     felt = felt_color(img)
+    ignore = np.zeros((H, W), bool)
+    boxes = card_reader.find_board_cards(img) if exclude is None else exclude
+    for bx0, by0, bx1, by1 in boxes:
+        ignore[max(0, by0):by1, max(0, bx0):bx1] = True
     scores = []
     for seat in config.SEATS:
         x0, y0, x1, y1 = config.zone_px(seat, W, H)
@@ -198,14 +216,18 @@ def seat_occupancy(img):
         if patch.size == 0:
             scores.append(0.0)
             continue
+        keep = ~ignore[y0:y1, x0:x1]
+        if not keep.any():
+            scores.append(0.0)
+            continue
         dist = np.linalg.norm(patch.astype(float) - felt, axis=2)
-        scores.append(float((dist > 45).mean()))
+        scores.append(float((dist[keep] > 45).mean()))
     return scores
 
 
-def count_players(img, threshold=0.35):
+def count_players(img, threshold=0.35, exclude=None):
     """Сколько игроков за столом (включая меня) + список занятых мест."""
-    scores = seat_occupancy(img)
+    scores = seat_occupancy(img, exclude=exclude)
     occupied = [i for i, s in enumerate(scores) if s >= threshold]
     return 1 + len(occupied), occupied, scores
 
@@ -330,7 +352,8 @@ def read_state(img, tpl_dir=None):
     cards = card_reader.read_table(img, tpl_dir=tpl_dir)
     board = cards['board']
     hole = cards['hole']
-    n_players, occupied, seat_scores = count_players(img)
+    board_boxes = [d['box'] for d in cards['detail']['board']]
+    n_players, occupied, seat_scores = count_players(img, exclude=board_boxes)
     dealer = find_dealer(img)
     where = dealer['where'] if dealer else None
     buttons = detect_action_buttons(img)
@@ -350,6 +373,7 @@ def read_state(img, tpl_dir=None):
 
     return {
         'my_turn': my_turn,
+        'in_hand': len(cards['detail']['hole']) >= 1,
         'buttons': buttons,
         'n_buttons': len(buttons),
         'has_bet': bet,
@@ -386,6 +410,6 @@ if __name__ == '__main__':
             print(f'место {i}: заполненность {s:.3f} {"занято" if s >= 0.35 else "пусто"}')
         sys.exit(0)
     state = read_state(image)
-    for k in ('my_turn', 'n_buttons', 'has_bet', 'hole', 'board', 'street', 'players',
+    for k in ('my_turn', 'in_hand', 'n_buttons', 'has_bet', 'hole', 'board', 'street', 'players',
               'dealer', 'position', 'first_to_act', 'pot_bb', 'to_call_bb', 'taps'):
         print(f'{k}: {state[k]}')

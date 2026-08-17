@@ -8,6 +8,7 @@
     python main.py                 # играть
     python main.py --dry-run       # всё считать и логировать, но НЕ тапать
     python main.py --once          # один проход (проверка)
+    python main.py --max-actions 20                # сыграть 20 решений и выйти
     python main.py --image shots/turn_191709.png   # разбор кадра из файла
 
 Лог решений: bot.log, история раздач: hand_history.jsonl
@@ -38,8 +39,12 @@ class AdbScreen:
         self.serial = serial or config.SERIAL
 
     def grab(self):
-        p = subprocess.run([self.adb, '-s', self.serial, 'exec-out', 'screencap', '-p'],
-                           capture_output=True, timeout=20)
+        try:
+            p = subprocess.run([self.adb, '-s', self.serial, 'exec-out', 'screencap', '-p'],
+                               capture_output=True, timeout=20)
+        except FileNotFoundError:
+            raise SystemExit(f'ERR: adb не найден: {self.adb}\n'
+                             'путь задаётся переменной CLUBGG_ADB или ключом --adb')
         if len(p.stdout) < 1000:
             return None
         buf = np.frombuffer(p.stdout, np.uint8)
@@ -84,6 +89,9 @@ class Bot:
         self.last_action_ts = 0.0
         self.last_state = None
         self.stable = 0
+        self.actions = 0
+        self.stats = {'fold': 0, 'check': 0, 'call': 0, 'raise': 0}
+        self.started = time.time()
 
     # ---------- вспомогательное ----------
     def log(self, msg):
@@ -136,6 +144,11 @@ class Bot:
         if not state['my_turn']:
             self.stable = 0
             return None
+        # КРИТИЧНО: карт у героя нет -> он не в раздаче, кнопки чужие/анимация. Не тапаем.
+        if not state['in_hand']:
+            self.stable = 0
+            self.log('кнопки есть, но карманных карт нет — не моя раздача, пропускаю')
+            return None
 
         hole = [c for c in state['hole'] if c]
         # новая раздача: карманные карты сменились
@@ -178,43 +191,82 @@ class Bot:
         if not self.dry_run and point:
             self.screen.tap(*point)
         self.record(entry)
+        self.actions += 1
+        self.stats[action] = self.stats.get(action, 0) + 1
         self.last_action_ts = time.time()
         return entry
 
+    def summary(self):
+        """Итоги сессии в лог: сколько раздач, решений и каких."""
+        mins = (time.time() - self.started) / 60
+        counts = ' '.join(f'{k}={v}' for k, v in self.stats.items() if v)
+        self.log(f'ИТОГИ: раздач={self.hand_id} решений={self.actions} '
+                 f'[{counts or "нет"}] за {mins:.1f} мин')
+
+    def wait_until_idle(self, interval=1.2, tries=8):
+        """Дождаться, пока кнопки исчезнут (ход принят), но не дольше tries кадров.
+
+        Без этого следующий кадр может застать те же кнопки и мы сыграем дважды.
+        """
+        for _ in range(tries):
+            img = self.screen.grab()
+            if img is None or not ts.is_my_turn(img):
+                return True
+            time.sleep(interval)
+        self.log('кнопки не исчезли после хода — жду следующий кадр')
+        return False
+
     # ---------- цикл ----------
-    def run(self, interval=1.2, settle=2.5, stable_frames=2):
-        self.log('=== БОТ ЗАПУЩЕН (без ИИ) ===')
-        while True:
-            try:
-                img = self.screen.grab()
-                if img is None:
-                    self.log('ERR: скриншот не получен, пауза 2с')
-                    time.sleep(2)
-                    continue
-                if not ts.is_my_turn(img):
+    def run(self, interval=1.2, settle=2.5, stable_frames=2, max_actions=None,
+            fail_limit=30):
+        """Бесконечный игровой цикл. max_actions — сыграть N решений и выйти."""
+        self.log('=== БОТ ЗАПУЩЕН (без ИИ) ===' + (' dry-run' if self.dry_run else ''))
+        fails = 0
+        try:
+            while max_actions is None or self.actions < max_actions:
+                try:
+                    img = self.screen.grab()
+                    if img is None:
+                        fails += 1
+                        if fails >= fail_limit:
+                            self.log(f'ERR: {fails} кадров подряд не получено — выхожу '
+                                     '(телефон отключён?)')
+                            return
+                        self.log('ERR: скриншот не получен, пауза 2с')
+                        time.sleep(2)
+                        continue
+                    fails = 0
+                    if not ts.is_my_turn(img):
+                        self.stable = 0
+                        time.sleep(interval)
+                        continue
+                    # два кадра подряд с кнопками = ход действительно наш (не анимация)
+                    self.stable += 1
+                    if self.stable < stable_frames:
+                        time.sleep(interval)
+                        continue
+                    if time.time() - self.last_action_ts < settle:
+                        time.sleep(interval)  # кнопки ещё не убрались после нашего тапа
+                        continue
                     self.stable = 0
-                    time.sleep(interval)
-                    continue
-                # два кадра подряд с кнопками = ход действительно наш (не анимация)
-                self.stable += 1
-                if self.stable < stable_frames:
-                    time.sleep(interval)
-                    continue
-                if time.time() - self.last_action_ts < settle:
-                    time.sleep(interval)      # кнопки ещё не убрались после нашего тапа
-                    continue
-                self.stable = 0
-                self.step(img)
-                time.sleep(settle)
-            except KeyboardInterrupt:
-                self.log('=== БОТ ОСТАНОВЛЕН ===')
-                return
-            except subprocess.TimeoutExpired:
-                self.log('adb не ответил, пауза 3с')
-                time.sleep(3)
-            except Exception as e:                       # цикл не должен падать
-                self.log(f'ОШИБКА: {type(e).__name__}: {e}')
-                time.sleep(2)
+                    entry = self.step(img)
+                    if entry is None:
+                        time.sleep(interval)
+                        continue
+                    time.sleep(settle)
+                    if not self.dry_run:
+                        self.wait_until_idle(interval)
+                except subprocess.TimeoutExpired:
+                    self.log('adb не ответил, пауза 3с')
+                    time.sleep(3)
+                except Exception as e:                   # цикл не должен падать
+                    self.log(f'ОШИБКА: {type(e).__name__}: {e}')
+                    time.sleep(2)
+            self.log(f'достигнут лимит решений ({max_actions})')
+        except KeyboardInterrupt:
+            self.log('=== БОТ ОСТАНОВЛЕН ===')
+        finally:
+            self.summary()
 
 
 def load_players_db(path=None):
@@ -234,11 +286,16 @@ def main(argv=None):
     ap.add_argument('--interval', type=float, default=1.2, help='пауза между кадрами, с')
     ap.add_argument('--settle', type=float, default=2.5, help='пауза после своего хода, с')
     ap.add_argument('--stack', type=float, default=69.6, help='стек в ББ')
+    ap.add_argument('--max-actions', type=int, help='сыграть N решений и выйти')
+    ap.add_argument('--adb', help=f'путь к adb (по умолчанию {config.ADB})')
+    ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
+    ap.add_argument('--templates', help=f'папка эталонов (по умолчанию {config.TEMPLATES_DIR})')
     args = ap.parse_args(argv)
 
-    screen = FileScreen(args.image) if args.image else AdbScreen()
+    screen = (FileScreen(args.image) if args.image
+              else AdbScreen(adb=args.adb, serial=args.serial))
     bot = Bot(screen, dry_run=args.dry_run or bool(args.image), stack_bb=args.stack,
-              players_db=load_players_db())
+              players_db=load_players_db(), tpl_dir=args.templates)
     if args.image or args.once:
         entry = bot.step()
         if entry is not None:
@@ -248,11 +305,12 @@ def main(argv=None):
             return 1
         else:
             print('не мой ход;', json.dumps(
-                {k: bot.last_state[k] for k in ('my_turn', 'n_buttons', 'hole', 'board',
-                                                'street', 'players', 'dealer', 'position')},
+                {k: bot.last_state[k] for k in ('my_turn', 'in_hand', 'n_buttons', 'hole',
+                                                'board', 'street', 'players', 'dealer',
+                                                'position')},
                 ensure_ascii=False))
         return 0
-    bot.run(interval=args.interval, settle=args.settle)
+    bot.run(interval=args.interval, settle=args.settle, max_actions=args.max_actions)
     return 0
 
 

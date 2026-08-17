@@ -301,6 +301,11 @@ def decide(state, profile=None, stack_bb=100.0):
     has_bet = bool(state.get('has_bet'))
     if len(hole) != 2:
         return _d('check' if not has_bet else 'fold', 'карты не распознаны — безопасное действие')
+    # В холдеме доска — 0/3/4/5 карт. 1-2 или >5 значит, что карту не прочитали:
+    # считать силу руки по неполной доске опасно (можно не увидеть флеш/стрит).
+    if len(board) in (1, 2) or len(board) > 5:
+        return _d('check' if not has_bet else 'fold',
+                  f'доска прочитана не полностью ({len(board)} карт) — безопасное действие')
 
     street = state.get('street') or ('preflop' if not board else 'unknown')
     to_call, pot = state.get('to_call_bb'), state.get('pot_bb')

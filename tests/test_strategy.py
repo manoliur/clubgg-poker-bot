@@ -164,6 +164,25 @@ class RobustnessTest(unittest.TestCase):
         d = st.decide(state(hole=['Ah'], has_bet=False))
         self.assertEqual(d['action'], 'check')
 
+    def test_incomplete_board_is_safe(self):
+        """Доска из 1-2 карт невозможна: карту не прочитали — не считаем силу руки."""
+        for board in (['Ad'], ['Ad', 'Ks']):
+            d = st.decide(state(hole=['Ah', 'Kd'], board=board, street='unknown',
+                                has_bet=True, to_call_bb=3.0, pot_bb=6.0))
+            self.assertEqual(d['action'], 'fold', board)
+            self.assertIn('не полностью', d['reason'])
+            d = st.decide(state(hole=['Ah', 'Kd'], board=board, street='unknown',
+                                has_bet=False, pot_bb=6.0))
+            self.assertEqual(d['action'], 'check', board)
+
+    def test_full_boards_are_played_normally(self):
+        for board in (['9d', '5s', '2c'], ['9d', '5s', '2c', '7h'],
+                      ['9d', '5s', '2c', '7h', 'Ts']):
+            d = st.decide(state(hole=['9h', '9c'], board=board,
+                                street={3: 'flop', 4: 'turn', 5: 'river'}[len(board)],
+                                has_bet=True, to_call_bb=3.0, pot_bb=9.0))
+            self.assertNotIn('не полностью', d['reason'])
+
     def test_garbage_card_string(self):
         d = st.decide(state(hole=['Xx', 'Kd'], has_bet=True, to_call_bb=2.0))
         self.assertEqual(d['action'], 'fold')

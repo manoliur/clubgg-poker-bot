@@ -154,6 +154,80 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(len(screen.taps), 1)
         self.assertLess(screen.taps[0][0], rx - int(W * 0.16))
 
+    def test_no_tap_when_not_in_hand(self):
+        """Кнопки внизу есть, но карманных карт нет — мы не в раздаче, тапать нельзя."""
+        frame = synth.render(hole=[], board=['Ad', 'Ks', '9c'], buttons=True,
+                             call_amount=True, players=2)
+        bot, screen = self.make_bot([frame])
+        self.assertIsNone(bot.step())
+        self.assertEqual(screen.taps, [])
+        self.assertFalse(bot.last_state['in_hand'])
+        self.assertTrue(bot.last_state['my_turn'])
+
+    def test_stats_and_summary(self):
+        frames = [
+            synth.render(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], buttons=True,
+                         call_amount=True, dealer='opp', players=2),
+            synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                         call_amount=True, dealer='me', players=2),
+        ]
+        bot, _ = self.make_bot(frames)
+        bot.step()
+        bot.step()
+        self.assertEqual(bot.actions, 2)
+        self.assertEqual(bot.stats['fold'], 1)
+        self.assertEqual(bot.stats['raise'], 1)
+        bot.summary()
+        with open(bot.log_path, encoding='utf-8') as f:
+            self.assertIn('ИТОГИ: раздач=2 решений=2', f.read())
+
+    def test_run_stops_at_max_actions(self):
+        frame = synth.render(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], buttons=True,
+                             call_amount=True, dealer='opp', players=2)
+        screen = FakeScreen([frame] * 12)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, max_actions=2)
+        self.assertEqual(bot.actions, 2)
+        self.assertEqual(len(screen.taps), 2)
+
+    def test_run_gives_up_when_no_frames(self):
+        """Телефон отключён (grab() -> None): цикл не висит вечно, а выходит."""
+        bot, screen = self.make_bot([])
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, fail_limit=3)
+        self.assertEqual(screen.taps, [])
+        self.assertEqual(bot.actions, 0)
+
+    def test_run_skips_frames_without_hole_cards(self):
+        """Кнопки без карт не должны тратить лимит решений и вызывать тапы."""
+        frames = [synth.render(hole=[], board=['Ad', 'Ks', '9c'], buttons=True,
+                               call_amount=True, players=2)] * 4
+        screen = FakeScreen(frames)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, fail_limit=1)
+        self.assertEqual(screen.taps, [])
+        self.assertEqual(bot.actions, 0)
+
+    def test_wait_until_idle(self):
+        acted = synth.render(hole=['7h', '2c'], buttons=True, players=2)
+        idle = synth.render(hole=['7h', '2c'], buttons=False, players=2)
+        bot, _ = self.make_bot([acted, idle])
+        with mock.patch.object(main_mod.time, 'sleep'):
+            self.assertTrue(bot.wait_until_idle(interval=0))
+        bot2, _ = self.make_bot([acted] * 3)
+        with mock.patch.object(main_mod.time, 'sleep'):
+            self.assertFalse(bot2.wait_until_idle(interval=0, tries=3))
+
+    def test_missing_adb_reports_clearly(self):
+        screen = main_mod.AdbScreen(adb='/nonexistent/adb', serial='xxx')
+        with self.assertRaises(SystemExit) as cm:
+            screen.grab()
+        self.assertIn('adb не найден', str(cm.exception))
+
     def test_cli_image_mode_does_not_tap(self):
         path = os.path.join(self.tmp, 'cli.png')
         cv2.imwrite(path, synth.render(hole=['Ah', 'Kd'], buttons=True, call_amount=True,
