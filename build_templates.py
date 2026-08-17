@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 import config
-from card_reader import (my_card_boxes, find_board_cards, corner_crop,
+from card_reader import (my_index_rects, find_board_cards, corner_crop, index_crop,
                          extract_glyphs, save_template, RANK_ORDER, SUITS)
 
 KNOWN = [
@@ -30,8 +30,11 @@ KNOWN = [
     {'file': 'shots/chk2.png',        'zone': 'my',    'cards': ['7h', '6s']},
     {'file': 'shots/turn_184049.png', 'zone': 'my',    'cards': ['Kc', '8c']},
     {'file': 'shots/after_call.png',  'zone': 'board', 'cards': ['6d', '5h', 'As']},
+    {'file': 'shots/after_call.png',  'zone': 'my',    'cards': ['Kc', '8c']},
     {'file': 'shots/fast1.png',       'zone': 'board', 'cards': ['6d', '5h', 'As', '9c']},
+    {'file': 'shots/fast1.png',       'zone': 'my',    'cards': ['Kc', '8c']},
     {'file': 'shots/fast2.png',       'zone': 'board', 'cards': ['6d', '5h', 'As', '9c', 'Qc']},
+    {'file': 'shots/fast2.png',       'zone': 'my',    'cards': ['Kc', '8c']},
 ]
 
 
@@ -53,18 +56,19 @@ def collect(labels, base=None, tpl_dir=None, verbose=True):
             if err:
                 skipped.append(f'{item["file"]}: {err}')
             continue
-        boxes = find_board_cards(img) if item['zone'] == 'board' else my_card_boxes(img)
+        board = item['zone'] == 'board'
+        boxes = find_board_cards(img) if board else my_index_rects(img)
         if len(boxes) < len(item['cards']):
             skipped.append(f'{item["file"]}: найдено {len(boxes)} карт < {len(item["cards"])}')
             continue
         for box, label in zip(boxes, item['cards']):
-            g = extract_glyphs(corner_crop(img, box))
+            g = extract_glyphs(corner_crop(img, box) if board else index_crop(img, box))
             if g is None:
                 skipped.append(f'{item["file"]} {label}: глифы не найдены')
                 continue
             rank, suit = label[0], label[1]
-            # «10» распознаётся по двум компонентам — эталон ранга T необязателен
-            if g['rank_parts'] < 2:
+            # «10» распознаётся по двум глифам — эталон ранга T необязателен
+            if rank != 'T':
                 acc_rank.setdefault(rank, []).append(g['rank_img'])
             if g['suit_img'] is not None:
                 acc_suit.setdefault(suit, []).append(g['suit_img'])

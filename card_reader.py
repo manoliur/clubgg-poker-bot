@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
 """Распознавание карт ClubGG по скриншоту (без ИИ).
 
-Почему старая версия возвращала '??' для моих карт
---------------------------------------------------
-Старый код резал угол карты фиксированными долями (45% x 45%), ресайзил к 50x66
-и делил на ранг/масть по фиксированной строке (RANK_H=36). Мои карты меньше карт
-доски (~112x148 против ~123x175) и лежат веером: бокс слипшегося контура делился
-ровно пополам, поэтому вырезанный «угол» правой карты уезжал в сторону, а глиф
-внутри нормализованного окна не совпадал по позиции и масштабу с эталоном ->
-корреляция < 0.3 -> '??'.
-
-Что сделано
------------
-1. Глифы (ранг и масть) СЕГМЕНТИРУЮТСЯ внутри угла как связные компоненты
-   «чернил» на белом фоне, а не режутся по фиксированным долям. Каждый глиф
-   обрезается по своему bbox и нормализуется к канону с сохранением пропорций,
-   поэтому распознавание не зависит от масштаба карты и сдвига угла.
-2. Слипшийся бокс делится не пополам, а по ожидаемому соотношению сторон карты:
-   левая карта начинается на x0, правая — на x1 - w_card. Для веера это даёт
-   правильные углы обеих карт.
-3. Ранг «10» узнаётся по двум компонентам в верхней строке -> 'T' (даже без эталона).
-4. Масть сначала сужается по цвету (красная h/d, чёрная c/s), затем выбирается
-   форма — так h/d и c/s больше не путаются между собой.
+Как читается карта
+------------------
+1. Карты доски находятся контуром белого лица; слипшийся контур делится по
+   ожидаемой ширине карты (высота / CARD_ASPECT).
+2. Мои карманные карты геометрией не берутся: они лежат веером внахлёст, снизу
+   их режет плашка игрока, а слева к белому пятну липнет светлое кольцо аватара.
+   Поэтому индекс (ранг+масть) обеих карт берётся фиксированными окнами
+   config.HERO_INDEX_RECTS — раскладка клиента неподвижна.
+3. Глифы внутри окна выделяются как ДЫРКИ в лице карты: берём самое крупное
+   белое пятно, и всё не-белое, полностью окружённое им, и есть индекс. Так
+   сами собой отсекаются сукно, тень, соседняя карта и крупный рисунок в центре
+   карты (он упирается в край окна и перестаёт быть дыркой), а порог яркости
+   больше не приходится подгонять под фон.
+4. Ранг «10» узнаётся по двум компонентам в верхней строке и широкому боксу.
+5. Масть сначала сужается по цвету (красная h/d, чёрная c/s), затем выбирается
+   форма — так h/d и c/s не путаются между собой.
 """
 import os
 import sys
@@ -41,6 +36,7 @@ CANON_SUIT = (28, 28)
 
 CARD_ASPECT = 1.42      # h / w для одной карты ClubGG
 MIN_SCORE = 0.45        # порог уверенности распознавания глифа
+T_WIDTH = 0.9           # «10» шире единичного ранга: w/h бокса не меньше этого
 
 # доля карты, занимаемая угловым индексом (rank+suit).
 # Ширина с запасом: «10» шире одиночного ранга, иначе второй глиф обрезается.
@@ -122,6 +118,10 @@ def _card_boxes_in_zone(img, zone, min_w_frac, max_w_frac, min_h_frac):
         x, y, w, h = cv2.boundingRect(c)
         if w < min_w_frac * W or w > max_w_frac * W or h < min_h_frac * H:
             continue
+        # лицо карты — сплошная заливка; светящаяся рамка плашки игрока имеет
+        # такой же бокс, но внутри пустая, и раньше считалась картой
+        if cv2.contourArea(c) < 0.6 * w * h:
+            continue
         box = (zx0 + x, zy0 + y, zx0 + x + w, zy0 + y + h)
         parts = _split_wide(box)
         # пропорции проверяем у ОТДЕЛЬНОЙ карты, а не у слипшегося контура
@@ -140,16 +140,32 @@ def find_board_cards(img):
     return boxes[:5]
 
 
-def my_card_boxes(img):
-    """Мои карманные карты: боксы слева направо, максимум 2."""
-    boxes = _card_boxes_in_zone(img, config.HERO_CARDS_ZONE,
-                                min_w_frac=0.060, max_w_frac=0.40, min_h_frac=0.040)
-    return boxes[:2]
+def my_index_rects(img):
+    """Окна индексов моих карманных карт: (x0,y0,x1,y1) слева направо.
+
+    Окна фиксированы (config.HERO_INDEX_RECTS) и масштабируются под размер
+    скриншота; отдаются только те, где действительно лежит лицо карты.
+    """
+    H, W = img.shape[:2]
+    rects = []
+    for rect in config.HERO_INDEX_RECTS:
+        x0, y0, x1, y1 = config.rect_px(rect, W, H)
+        crop = img[max(0, y0):y1, max(0, x0):x1]
+        if crop.size == 0 or card_face(crop) is None:
+            continue
+        rects.append((x0, y0, x1, y1))
+    return rects
 
 
 # --------------------------------------------------------------------------
 # сегментация глифов в углу карты
 # --------------------------------------------------------------------------
+def index_crop(img, rect):
+    """Кроп по готовому прямоугольнику (x0,y0,x1,y1) экрана."""
+    x0, y0, x1, y1 = rect
+    return img[max(0, y0):y1, max(0, x0):x1]
+
+
 def corner_crop(img, box):
     """Угол карты (BGR) с отступом от рамки."""
     x0, y0, x1, y1 = box
@@ -163,15 +179,40 @@ def corner_crop(img, box):
     return img[cy0:cy1, cx0:cx1]
 
 
-def ink_mask(corner_bgr):
-    """Маска «чернил» глифа на белом фоне карты (тёмное ИЛИ насыщенно-красное)."""
-    hsv = cv2.cvtColor(corner_bgr, cv2.COLOR_BGR2HSV)
-    s, v = hsv[:, :, 1].astype(int), hsv[:, :, 2].astype(int)
-    # порог по яркости адаптивный: фон карты почти белый
-    bg = np.percentile(v, 80)
-    dark = v < max(120, bg * 0.75)
-    colored = (s > 90) & (v > 60)
-    return ((dark | colored).astype(np.uint8)) * 255
+def card_face(corner_bgr, min_frac=0.35):
+    """Лицо карты в окне: самое крупное белое пятно, или None если карты нет."""
+    face = white_mask(corner_bgr, thr=150)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(face, 8)
+    if n < 2:
+        return None
+    big = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    if stats[big, cv2.CC_STAT_AREA] < min_frac * face.size:
+        return None
+    return (labels == big).astype(np.uint8) * 255
+
+
+def ink_mask(corner_bgr, allow_bottom=False):
+    """Маска глифов индекса: дырки внутри лица карты.
+
+    Дырка = не-белая область, не касающаяся края окна. Всё, что упирается в
+    край (сукно, тень, соседняя карта, рисунок в центре карты), отсекается.
+    allow_bottom разрешает касание нижнего края — для случая, когда индекс
+    снизу перекрыт всплывающей плашкой и глиф масти обрезан.
+    """
+    face = card_face(corner_bgr)
+    if face is None:
+        return None
+    H, W = face.shape
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(cv2.bitwise_not(face), 4)
+    holes = np.zeros_like(face)
+    for i in range(1, n):
+        x, y, w, h, _ = stats[i]
+        if x == 0 or y == 0 or x + w == W:
+            continue
+        if y + h == H and not allow_bottom:
+            continue
+        holes[labels == i] = 255
+    return holes
 
 
 def _components(mask):
@@ -183,12 +224,6 @@ def _components(mask):
     for i in range(1, n):
         x, y, w, h, area = stats[i]
         if area < min_area or w < 2 or h < 4:
-            continue
-        if w > W * 0.95 and h > H * 0.95:      # весь угол засветился — мусор
-            continue
-        if h > H * 0.9 and w < W * 0.3:        # вертикальная полоса фона у края
-            continue
-        if w > W * 0.9 and h < H * 0.3:        # горизонтальная полоса (рамка)
             continue
         comps.append((x, y, w, h, area, i))
     comps.sort(key=lambda c: c[1])
@@ -210,14 +245,43 @@ def _norm_glyph(mask, bbox, canon):
 
 
 def extract_glyphs(corner_bgr):
-    """Из угла карты выделить глифы.
+    """Из окна индекса выделить глифы ранга и масти.
 
     Возвращает dict: rank_img, suit_img (канон, бинарные), rank_parts (шт.),
-    color ('red'/'black'), либо None если глифов не нашлось.
+    rank_wide (ширина/высота бокса ранга — у «10» она заметно больше),
+    color ('red'/'black'), mask; либо None если глифов не нашлось.
     """
     if corner_bgr is None or corner_bgr.size == 0:
         return None
-    mask = ink_mask(corner_bgr)
+    g = _glyphs_from_mask(corner_bgr, ink_mask(corner_bgr))
+    if g is not None and g['suit_img'] is None:
+        # масть срезана снизу всплывающей плашкой («Бет», панель игрока): режем
+        # окно по её краю и разрешаем усечённому глифу упираться в низ окна
+        cut = _cut_at_overlap(corner_bgr)
+        if cut is not None:
+            alt = _glyphs_from_mask(cut, ink_mask(cut, allow_bottom=True))
+            if alt is not None and alt['suit_img'] is not None:
+                return alt
+    return g
+
+
+def _cut_at_overlap(corner_bgr):
+    """Окно, обрезанное по верхнему краю перекрывающей карту плашки, или None."""
+    face = card_face(corner_bgr)
+    if face is None:
+        return None
+    H, W = face.shape
+    wide = (face > 0).sum(axis=1) >= 0.25 * W        # строка идёт по лицу карты
+    if wide.all():
+        return None
+    top = int(np.argmax(wide))
+    cut = top + int(np.argmin(wide[top:]))
+    return corner_bgr[:cut] if cut > top + H // 3 else None
+
+
+def _glyphs_from_mask(corner_bgr, mask):
+    if mask is None:
+        return None
     comps, labels = _components(mask)
     if not comps:
         return None
@@ -237,40 +301,47 @@ def extract_glyphs(corner_bgr):
     ry0 = min(c[1] for c in rank_comps)
     rx1 = max(c[0] + c[2] for c in rank_comps)
     ry1 = max(c[1] + c[3] for c in rank_comps)
-    rank_img = _norm_glyph(mask, (rx0, ry0, rx1 - rx0, ry1 - ry0), CANON_RANK)
+    rank_w, rank_h = rx1 - rx0, ry1 - ry0
+    rank_img = _norm_glyph(mask, (rx0, ry0, rank_w, rank_h), CANON_RANK)
 
     # масть = ближайший компонент ПОД рангом, примерно под тем же x (не рисунок карты)
-    rank_w = rx1 - rx0
     below = [c for c in comps
-             if c not in rank_comps and c[1] >= ry1 - 0.3 * (ry1 - ry0)
+             if c not in rank_comps and c[1] >= ry1 - 0.3 * rank_h
              and rx0 - 1.0 * rank_w < c[0] + c[2] / 2 < rx1 + 1.0 * rank_w]
-    suit_img, color = None, 'black'
+    suit_img, suit_raw, sel, trunc = None, None, None, False
     if below:
         s = min(below, key=lambda c: c[1])
         bbox = (s[0], s[1], s[2], s[3])
-        rank_h = ry1 - ry0
-        if s[2] > 1.8 * rank_w or s[3] > 1.8 * rank_h:
-            # значок слипся с рисунком в центре карты — ограничим область под рангом
+        # значок масти примерно одного размера с рангом; вдвое больший — слипся
+        # с рисунком в центре карты, оставляем от него область под рангом
+        if s[2] > 2.0 * rank_w or s[3] > 2.0 * rank_h:
             bbox = _clip_suit_bbox(mask, bbox, rx0, rx1, rank_w, rank_h)
+        x, y, w, h = bbox
+        suit_raw = mask[y:y + h, x:x + w]
         suit_img = _norm_glyph(mask, bbox, CANON_SUIT)
-        color = glyph_color(corner_bgr, labels == s[5])
-    else:
-        color = glyph_color(corner_bgr, labels == anchor[5])
+        sel = (labels == s[5])
+        trunc = y + h >= mask.shape[0]          # значок упёрся в низ окна — обрезан
 
-    return {'rank_img': rank_img, 'suit_img': suit_img,
-            'rank_parts': len(rank_comps), 'color': color, 'mask': mask}
+    ink = np.zeros(mask.shape, bool)
+    for c in rank_comps:
+        ink |= (labels == c[5])
+    if sel is not None:
+        ink |= sel
+    return {'rank_img': rank_img, 'suit_img': suit_img, 'suit_raw': suit_raw,
+            'suit_trunc': trunc, 'rank_parts': len(rank_comps),
+            'rank_wide': rank_w / max(1, rank_h), 'color': glyph_color(corner_bgr, ink),
+            'mask': mask}
 
 
 def _clip_suit_bbox(mask, bbox, rx0, rx1, rank_w, rank_h):
     """Обрезать раздувшийся компонент масти до области ровно под рангом."""
     x, y, w, h = bbox
-    cx0 = max(x, int(rx0 - 0.5 * rank_w))
-    cx1 = min(x + w, int(rx1 + 0.5 * rank_w))
-    cy1 = min(y + h, int(y + 1.6 * rank_h))
+    cx0 = max(x, int(rx0 - 0.6 * rank_w))
+    cx1 = min(x + w, int(rx1 + 0.6 * rank_w))
+    cy1 = min(y + h, int(y + 1.4 * rank_h))
     if cx1 - cx0 < 4 or cy1 - y < 4:
         return bbox
-    sub = mask[y:cy1, cx0:cx1]
-    ys, xs = np.nonzero(sub)
+    ys, xs = np.nonzero(mask[y:cy1, cx0:cx1])
     if len(xs) == 0:
         return bbox
     return (cx0 + xs.min(), y + ys.min(), xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)
@@ -315,20 +386,57 @@ def match_best(part, templates, allowed=None):
     return best_name, best
 
 
-def recognize_card(img, box, ranks, suits):
-    """Распознать карту в боксе. Возвращает (строка_карты|None, score, инфо)."""
-    corner = corner_crop(img, box)
+def _ink_bbox(img):
+    """Бокс непустых пикселей (x, y, w, h) или None."""
+    ys, xs = np.nonzero(img)
+    if len(xs) == 0:
+        return None
+    return xs.min(), ys.min(), xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+
+
+def match_suit(g, suits, allowed):
+    """Масть по глифу.
+
+    Значок, срезанный снизу плашкой, нормализация растягивает на всю высоту
+    канона, и обрубок трефы становится похож на пику. Поэтому у обрезанного
+    глифа эталоны режутся сверху той же долей: сравниваются одинаковые куски.
+    """
+    if not g['suit_trunc'] or g['suit_raw'] is None:
+        return match_best(g['suit_img'], suits, allowed=allowed)
+    rh, rw = g['suit_raw'].shape
+    best_name, best = None, -1.0
+    for name in allowed:
+        tpl = suits.get(name)
+        bbox = _ink_bbox(tpl) if tpl is not None else None
+        if bbox is None:
+            continue
+        x, y, w, h = bbox
+        # глиф и эталон подобны, ширина у обрезанного значка сохранилась
+        cut = int(round(h * rh / max(1.0, rw * h / w)))
+        if not 3 <= cut < h:
+            continue
+        _, score = match_best(g['suit_img'], {name: _norm_glyph(tpl, (x, y, w, cut), CANON_SUIT)})
+        if score > best:
+            best, best_name = score, name
+    if best_name is None:                  # обрезка не применима — обычное сравнение
+        return match_best(g['suit_img'], suits, allowed=allowed)
+    return best_name, best
+
+
+def recognize_corner(corner, ranks, suits):
+    """Распознать карту по окну индекса. Возвращает (строка_карты|None, score, инфо)."""
     g = extract_glyphs(corner)
     if g is None:
         return None, 0.0, {'reason': 'no glyphs'}
 
     color = g['color']
     allowed_suits = RED_SUITS if color == 'red' else BLACK_SUITS
-    suit, s_score = match_best(g['suit_img'], suits, allowed=allowed_suits)
+    suit, s_score = match_suit(g, suits, allowed_suits)
     if suit is None:                       # нет эталонов масти — хотя бы цвет
         suit, s_score = ('h' if color == 'red' else 's'), 0.0
 
-    if g['rank_parts'] >= 2:               # «10» — единственный двухглифовый ранг
+    # «10» — единственный ранг из двух глифов, его бокс заметно шире прочих
+    if g['rank_parts'] >= 2 and g['rank_wide'] >= T_WIDTH:
         rank, r_score = 'T', 1.0
     else:
         allowed_ranks = [r for r in ranks if r != 'T'] or None
@@ -345,6 +453,11 @@ def recognize_card(img, box, ranks, suits):
     return f'{rank}{suit}', score, info
 
 
+def recognize_card(img, box, ranks, suits):
+    """Распознать карту в боксе (доска). Возвращает (строка_карты|None, score, инфо)."""
+    return recognize_corner(corner_crop(img, box), ranks, suits)
+
+
 # --------------------------------------------------------------------------
 # верхний уровень
 # --------------------------------------------------------------------------
@@ -357,10 +470,10 @@ def read_table(img, tpl_dir=None):
     ranks, suits = load_templates(tpl_dir)
     detail = {'hole': [], 'board': []}
     hole, board = [], []
-    for box in my_card_boxes(img):
-        card, score, info = recognize_card(img, box, ranks, suits)
+    for rect in my_index_rects(img):
+        card, score, info = recognize_corner(index_crop(img, rect), ranks, suits)
         hole.append(card)
-        detail['hole'].append({'box': box, 'card': card, 'score': round(score, 3), **info})
+        detail['hole'].append({'box': rect, 'card': card, 'score': round(score, 3), **info})
     for box in find_board_cards(img):
         card, score, info = recognize_card(img, box, ranks, suits)
         if card:
@@ -376,13 +489,13 @@ def debug_dump(img, out_dir, tpl_dir=None):
     os.makedirs(out_dir, exist_ok=True)
     ranks, suits = load_templates(tpl_dir)
     vis = img.copy()
-    for kind, boxes in (('hole', my_card_boxes(img)), ('board', find_board_cards(img))):
+    for kind, boxes in (('hole', my_index_rects(img)), ('board', find_board_cards(img))):
         for i, box in enumerate(boxes):
-            card, score, info = recognize_card(img, box, ranks, suits)
+            corner = index_crop(img, box) if kind == 'hole' else corner_crop(img, box)
+            card, score, info = recognize_corner(corner, ranks, suits)
             cv2.rectangle(vis, box[:2], box[2:], (0, 255, 0), 3)
             cv2.putText(vis, f'{card or "??"} {score:.2f}', (box[0], box[1] - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-            corner = corner_crop(img, box)
             if corner is not None:
                 cv2.imwrite(os.path.join(out_dir, f'{kind}{i}_corner.png'), corner)
                 g = extract_glyphs(corner)
