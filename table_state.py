@@ -119,22 +119,23 @@ def has_bet(img):
 def action_points(img):
     """Куда тапать: {'fold': (x,y), 'call': (x,y), 'raise': (x,y)}.
 
-    Берём реальные кнопки, если их видно; иначе — эталонные координаты из config.
+    Найденную кнопку привязываем к действию по эталонному центру, который в неё
+    попал (по порядку нельзя: поиск идёт только правее ACTION_BAR_X0, поэтому
+    «Фолд» слева не детектится и btns[0] — это «Колл»). Что не нашлось —
+    остаётся эталонной координатой из config.
     """
     H, W = img.shape[:2]
-    pts = {'fold': config.scale(config.BTN_FOLD, W, H),
+    ref = {'fold': config.scale(config.BTN_FOLD, W, H),
            'call': config.scale(config.BTN_CALL, W, H),
            'raise': config.scale(config.BTN_RAISE, W, H)}
-    btns = detect_action_buttons(img)
-    if len(btns) >= 3:
-        pts['fold'] = (btns[0]['x'], btns[0]['y'])
-        pts['call'] = (btns[1]['x'], btns[1]['y'])
-        pts['raise'] = (btns[-1]['x'], btns[-1]['y'])
-    elif len(btns) == 2:
-        pts['fold'] = (btns[0]['x'], btns[0]['y'])
-        pts['call'] = (btns[1]['x'], btns[1]['y'])
-    elif len(btns) == 1:
-        pts['call'] = (btns[0]['x'], btns[0]['y'])
+    pts = dict(ref)
+    x_min = int(config.ACTION_BAR_X0 * W / config.REF_W)
+    for b in detect_action_buttons(img):
+        for name, (rx, _) in ref.items():
+            if b['x0'] <= rx <= b['x1']:
+                # левый край кнопки обрезан зоной поиска — её центр смещён, берём эталонный x
+                pts[name] = (rx if b['x0'] <= x_min else b['x'], b['y'])
+                break
     return pts
 
 
