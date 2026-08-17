@@ -2,6 +2,7 @@
 """Тесты главного цикла: сквозной проход кадр -> решение -> тап -> лог."""
 import io
 import os
+import random
 import sys
 import json
 import shutil
@@ -222,6 +223,15 @@ class MainLoopTest(unittest.TestCase):
         with mock.patch.object(main_mod.time, 'sleep'):
             self.assertFalse(bot2.wait_until_idle(interval=0, tries=3))
 
+    def test_log_survives_non_utf8_console(self):
+        """Консоль Windows в cp866 не знает «—»: лог не должен ронять бота."""
+        bot, _ = self.make_bot([])
+        buf = io.TextIOWrapper(io.BytesIO(), encoding='cp866', errors='strict')
+        with mock.patch.object(sys, 'stdout', buf):
+            bot.log('ИТОГИ — проверка')
+        with open(bot.log_path, encoding='utf-8') as f:
+            self.assertIn('ИТОГИ — проверка', f.read())
+
     def test_missing_adb_reports_clearly(self):
         screen = main_mod.AdbScreen(adb='/nonexistent/adb', serial='xxx')
         with self.assertRaises(SystemExit) as cm:
@@ -266,6 +276,57 @@ class MainLoopTest(unittest.TestCase):
             self.assertEqual(entry['hole'], [None, None])
         finally:
             shutil.rmtree(empty, ignore_errors=True)
+
+
+class SoakTest(unittest.TestCase):
+    """Сквозная проверка на случайных столах: карты, игроки, законность действия, тап."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix='clubgg_soak_')
+        cls.tpl = os.path.join(cls.tmp, 'templates')
+        cards = [f'{r}{s}' for r in card_reader.RANK_ORDER for s in card_reader.SUITS]
+        labels = []
+        for i in range(0, len(cards), 5):
+            chunk = cards[i:i + 5]
+            p = os.path.join(cls.tmp, f'train{i}.png')
+            synth.save(p, board=chunk, hole=[])
+            labels.append({'file': p, 'zone': 'board', 'cards': chunk})
+        collect(labels, base=cls.tmp, tpl_dir=cls.tpl, verbose=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_random_tables(self):
+        cards = [f'{r}{s}' for r in card_reader.RANK_ORDER for s in card_reader.SUITS]
+        rnd = random.Random(7)
+        for i in range(40):
+            deck = rnd.sample(cards, 7)
+            n_board = rnd.choice([0, 3, 4, 5])
+            hole, board = deck[:2], deck[2:2 + n_board]
+            players = rnd.randint(2, 9)
+            bet = rnd.choice([True, False])
+            frame = synth.render(hole=hole, board=board, buttons=True, call_amount=bet,
+                                 dealer=rnd.choice(['me', 'opp']), players=players)
+            screen = FakeScreen([frame])
+            bot = Bot(screen, tpl_dir=self.tpl,
+                      log_path=os.path.join(self.tmp, 'soak.log'),
+                      history_path=os.path.join(self.tmp, 'soak.jsonl'))
+            e = bot.step()
+            msg = f'#{i} {hole} {board} игроков={players} ставка={bet}'
+            self.assertIsNotNone(e, msg)
+            self.assertEqual([c for c in e['hole'] if c], hole, msg)
+            self.assertEqual(e['board'], board, msg)
+            self.assertEqual(e['players'], players, msg)
+            self.assertIn(e['action'], ('fold', 'check', 'call', 'raise'), msg)
+            if bet:
+                self.assertNotEqual(e['action'], 'check', 'чек при ставке — ' + msg)
+            else:
+                self.assertNotEqual(e['action'], 'call', 'колл без ставки — ' + msg)
+            self.assertEqual(len(screen.taps), 1, msg)
+            _, y = screen.taps[0]
+            self.assertTrue(config.REF_H * 0.86 <= y <= config.REF_H * 0.99, msg)
 
 
 if __name__ == '__main__':

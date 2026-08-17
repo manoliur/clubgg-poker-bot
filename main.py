@@ -96,7 +96,12 @@ class Bot:
     # ---------- вспомогательное ----------
     def log(self, msg):
         line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
-        print(line, flush=True)
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            # консоль Windows не в UTF-8 (cp866 не знает тире «—») — не падать из-за лога
+            enc = sys.stdout.encoding or 'ascii'
+            print(line.encode(enc, 'replace').decode(enc, 'replace'), flush=True)
         try:
             with open(self.log_path, 'a', encoding='utf-8') as f:
                 f.write(line + '\n')
@@ -291,6 +296,8 @@ def main(argv=None):
     ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
     ap.add_argument('--templates', help=f'папка эталонов (по умолчанию {config.TEMPLATES_DIR})')
     args = ap.parse_args(argv)
+    if hasattr(sys.stdout, 'reconfigure'):    # русский лог в консоли Windows (cp866)
+        sys.stdout.reconfigure(errors='replace')
 
     screen = (FileScreen(args.image) if args.image
               else AdbScreen(adb=args.adb, serial=args.serial))
