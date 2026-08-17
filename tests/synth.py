@@ -68,8 +68,16 @@ def draw_suit(img, cx, cy, size, suit, color):
         cv2.rectangle(img, (cx - 2, cy + r // 2), (cx + 2, cy + s), color, -1)
 
 
-def draw_card(img, x, y, w, h, card):
-    """Карта лицом вверх: белый прямоугольник + индекс (ранг над мастью) в углу."""
+def draw_card(img, x, y, w, h, card, index_rect=None, center_picture=True):
+    """Карта лицом вверх: белый прямоугольник + индекс (ранг над мастью) в углу.
+
+    index_rect (x0,y0,x1,y1, экранные пиксели) — куда положить индекс: для моих
+    карт это фиксированные окна config.HERO_INDEX_RECTS (подогнаны под реальную
+    раскладку ClubGG), поэтому глифы рисуются ВНУТРИ окна с отступом 6-8px.
+    Без index_rect (карты доски) индекс рисуется в левом верхнем углу карты.
+    center_picture=False — не рисовать крупный значок масти в центре: у моих
+    карт он попал бы в фиксированное окно индекса и был бы принят за ранг.
+    """
     _rounded_rect(img, x, y, x + w, y + h, WHITE, r=10)
     if card is None:
         return
@@ -79,11 +87,15 @@ def draw_card(img, x, y, w, h, card):
     scale = h / 145.0
     thick = max(2, int(3 * scale))
     (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, scale * 1.3, thick)
-    tx, ty = x + int(w * 0.10), y + int(h * 0.06) + th
+    if index_rect is not None:
+        tx, ty = index_rect[0] + 6, index_rect[1] + 8 + th
+    else:
+        tx, ty = x + int(w * 0.10), y + int(h * 0.06) + th
     cv2.putText(img, text, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, scale * 1.3, color, thick)
     draw_suit(img, tx + tw // 2, ty + int(h * 0.16), int(h * 0.085), suit, color)
     # центральный рисунок (крупный значок масти) — не должен мешать распознаванию угла
-    draw_suit(img, x + w // 2, y + int(h * 0.68), int(h * 0.15), suit, color)
+    if center_picture:
+        draw_suit(img, x + w // 2, y + int(h * 0.68), int(h * 0.15), suit, color)
 
 
 def draw_button(img, center, w, h, label_yellow=False):
@@ -111,7 +123,10 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
     hole = hole or []
     for i, card in enumerate(hole[:2]):
         x = HOLE_X0 + i * (HOLE_CARD[0] - HOLE_OVERLAP)
-        draw_card(img, x, HOLE_Y, HOLE_CARD[0], HOLE_CARD[1], card)
+        rect = (config.rect_px(config.HERO_INDEX_RECTS[i], W, H)
+                if i < len(config.HERO_INDEX_RECTS) else None)
+        draw_card(img, x, HOLE_Y, HOLE_CARD[0], HOLE_CARD[1], card,
+                  index_rect=rect, center_picture=False)
 
     # панели игроков (герой + оппоненты по местам из config.SEATS)
     seats = config.SEATS[:max(0, players - 1)]

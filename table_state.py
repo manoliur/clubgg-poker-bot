@@ -110,7 +110,7 @@ def hero_has_cards(img):
     Важно для игрового цикла: кнопки внизу могут появиться от анимации или чужого
     хода, а тапать, не будучи в раздаче, нельзя.
     """
-    return len(card_reader.my_card_boxes(img)) >= 1
+    return len(card_reader.my_index_rects(img)) >= 1
 
 
 def has_bet(img):

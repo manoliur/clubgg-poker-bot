@@ -68,15 +68,16 @@ class CardReaderTest(unittest.TestCase):
         self.assertEqual(len(boxes), 5)
 
     def test_hole_boxes_split_from_fan(self):
-        """Слипшийся контур двух карт делится на две правдоподобные карты."""
-        boxes = card_reader.my_card_boxes(synth.render(hole=['Ah', 'Kd']))
-        self.assertEqual(len(boxes), 2)
-        (x0, y0, x1, y1), (u0, v0, u1, v1) = boxes
-        self.assertLess(x0, u0)
-        for b in boxes:
-            w, h = b[2] - b[0], b[3] - b[1]
-            self.assertGreater(h / w, 1.2)
-            self.assertLess(h / w, 1.8)
+        """Фиксированные окна индексов (my_index_rects): обе карты дают окна.
+
+        Окна берутся из config.HERO_INDEX_RECTS и отдаются только там, где реально
+        лежит лицо карты: с картами их два (слева направо), без карт — ни одного.
+        """
+        img = synth.render(hole=['Ah', 'Kd'])
+        rects = card_reader.my_index_rects(img)
+        self.assertEqual(len(rects), 2)
+        self.assertLess(rects[0][0], rects[1][0])
+        self.assertEqual(card_reader.my_index_rects(synth.render(hole=[])), [])
 
     def test_my_cards_recognized(self):
         """Главный баг: мои карты возвращали '??'."""
