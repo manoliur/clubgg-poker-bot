@@ -185,6 +185,87 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(len(screen.taps), 1)
         self.assertLess(screen.taps[0][0], config.PRESET_X[0], 'тап по коллу, не по столбцу')
 
+    # ---------- свёрнутый столбец ставки: двухшаговый тап ----------
+    def collapsed_bot(self, frames, dry_run=False):
+        """Бот без пауз между тапом шеврона и перечитыванием кадра."""
+        bot, screen = self.make_bot(frames, dry_run=dry_run)
+        bot.EXPAND_WAIT = 0
+        return bot, screen
+
+    @staticmethod
+    def collapsed_frame(**kw):
+        """Свёрнутый столбец: одна кнопка «Бет» + шеврон. Погашена — ставить нечем."""
+        return synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                            call_amount=True, dealer='me', players=2, chevron=True, **kw)
+
+    def test_collapsed_column_expanded_before_bet(self):
+        """Единственная кнопка ставки погашена -> тап шеврона, потом живой пресет.
+
+        Из отчёта по живой сессии: свёрнутый столбец + погашенная кнопка = бот
+        чекал вместо ставки, потому что раскрывать столбец не умел.
+        """
+        # после раскрытия нижняя кнопка так и остаётся погашенной (её размер
+        # меньше минимальной ставки) — ставку делает пресет покрупнее
+        frames = [self.collapsed_frame(dim_presets=(0,)),
+                  self.collapsed_frame(presets=3, dim_presets=(0,))]
+        bot, screen = self.collapsed_bot(frames)
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'raise')
+        self.assertEqual(len(screen.taps), 2, 'шеврон + пресет')
+        W, H = frames[0].shape[1], frames[0].shape[0]
+        self.assertEqual(screen.taps[0], config.scale(config.CHEVRON, W, H))
+        self.assertGreater(screen.taps[1][0], int(config.PRESET_X[0] * W / config.REF_W),
+                           'второй тап — по столбцу ставки')
+        dead = ts.raise_presets(frames[1])[0]
+        self.assertLess(screen.taps[1][1], dead['y'],
+                        'по живому пресету выше, а не по погашенной кнопке')
+
+    def test_column_not_expanded_falls_back_to_passive(self):
+        """Столбец не раскрылся (кадр не изменился) -> безопасный колл/чек."""
+        frames = [self.collapsed_frame(dim_presets=(0,))] * 3
+        bot, screen = self.collapsed_bot(frames)
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'call')
+        self.assertEqual(len(screen.taps), 2, 'шеврон (один раз!) + колл')
+        self.assertLess(screen.taps[1][0], config.PRESET_X[0], 'тап по коллу, не по столбцу')
+        with open(bot.log_path, encoding='utf-8') as f:
+            self.assertIn('столбец не раскрылся', f.read())
+
+    def test_column_expand_stops_when_turn_is_gone(self):
+        """Пока раскрывали столбец, ход ушёл — не тапаем в чужой кадр."""
+        frames = [self.collapsed_frame(dim_presets=(0,)),
+                  synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=False)]
+        bot, screen = self.collapsed_bot(frames)
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'call', 'играем пассивно по прежнему кадру')
+        self.assertEqual(len(screen.taps), 2)
+
+    def test_no_chevron_tap_when_column_already_open(self):
+        """Столбец раскрыт — шеврон не трогаем (иначе свернём его сами)."""
+        frames = [self.collapsed_frame(presets=3)]
+        bot, screen = self.collapsed_bot(frames)
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'raise')
+        self.assertEqual(len(screen.taps), 1)
+
+    def test_dry_run_does_not_tap_chevron(self):
+        frames = [self.collapsed_frame(dim_presets=(0,))]
+        bot, screen = self.collapsed_bot(frames, dry_run=True)
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'call')
+        self.assertEqual(screen.taps, [])
+
+    def test_expand_wanted_when_size_does_not_fit(self):
+        """Кнопка живая, но размер не тот — столбец тоже стоит раскрыть."""
+        frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                             call_amount=False, dealer='me', players=2, chevron=True)
+        state = ts.read_state(frame, tpl_dir=self.tpl)
+        bot, _ = self.collapsed_bot([])
+        self.assertTrue(state['presets_collapsed'])
+        self.assertTrue(bot.wants_expand(state, 1.00), 'доступен только нижний пресет 33%')
+        self.assertFalse(bot.wants_expand(state, 0.33), 'нужный размер и так под рукой')
+        self.assertFalse(bot.wants_expand(state, None))
+
     def test_bet_size_picks_nearest_preset(self):
         """Пресет выбирается по доле банка из стратегии, а не «всегда нижний»."""
         frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,

@@ -76,6 +76,11 @@ class FileScreen:
 # бот
 # --------------------------------------------------------------------------
 class Bot:
+    # раскрытие свёрнутого столбца ставки (двухшаговый тап)
+    EXPAND_WAIT = 0.7        # сколько ждать перерисовки после тапа шеврона, с
+    EXPAND_TRIES = 2         # столько кадров перечитываем (тап при этом ОДИН)
+    PRESET_FRAC_TOL = 0.2    # ближе этого к нужной доле банка — размер устраивает
+
     def __init__(self, screen, dry_run=False, stack_bb=69.6, players_db=None,
                  tpl_dir=None, log_path=None, history_path=None, chart=None):
         self.screen = screen
@@ -201,6 +206,68 @@ class Bot:
                      f'жму пресет #{best["i"]} в ({best["x"]},{best["y"]})')
         return best['x'], best['y']
 
+    def decide(self, state):
+        return strategy.decide(state, profile=self.opponent_profile(),
+                               stack_bb=self.stack_bb, chart=self.chart)
+
+    def wants_expand(self, state, pot_frac=None):
+        """Надо ли раскрывать свёрнутый столбец ставки перед рейзом/бетом.
+
+        Свёрнутый столбец — это ОДНА кнопка «Бет»/«Рейз до» вместо четырёх.
+        Раскрываем в двух случаях: ставить нечем (единственная кнопка погашена —
+        её размер меньше минимальной ставки, тап по ней не делает ничего) или
+        доступный размер далёк от того, который просит стратегия.
+        """
+        if not state.get('presets_collapsed'):
+            return False
+        live = [p for p in (state.get('raise_presets') or []) if p['enabled']]
+        if not live:
+            return True
+        if pot_frac and not state['has_bet']:
+            # доли банка подписаны только у пресетов ставки (33/50/75/100%);
+            # против ставки строки подписаны абсолютным «Рейз до X ББ»
+            fr = config.PRESET_POT_FRAC
+            have = fr[min(live[0]['i'], len(fr) - 1)]
+            return abs(have - pot_frac) > self.PRESET_FRAC_TOL
+        return False
+
+    def expand_presets(self, state, img):
+        """Тапнуть шеврон и перечитать кадр. Возвращает (состояние, кадр).
+
+        Второй шаг взаимодействия: клиент перерисовывает столбец не мгновенно,
+        поэтому после тапа ждём EXPAND_WAIT и снимаем кадр заново (до
+        EXPAND_TRIES раз — тап при этом ровно один, повторный свернул бы
+        столбец обратно). Не получилось (шеврона нет, кадр не изменился, ход
+        ушёл) — возвращаем прежнее состояние, и вызывающий сыграет пассивно.
+        """
+        point = state.get('chevron')
+        if point is None:
+            self.log('столбец ставки свёрнут, но шеврона не видно — играю пассивно')
+            return state, img
+        if self.dry_run:
+            self.log(f'столбец ставки свёрнут — тапнул бы шеврон {point} (dry-run)')
+            return state, img
+        self.log(f'столбец ставки свёрнут — тапаю шеврон {point}, перечитываю кадр')
+        self.screen.tap(*point)
+        hole = [c for c in state['hole'] if c]
+        for _ in range(self.EXPAND_TRIES):
+            time.sleep(self.EXPAND_WAIT)
+            img2 = self.screen.grab()
+            if img2 is None:
+                break
+            state2 = ts.read_state(img2, tpl_dir=self.tpl_dir)
+            if not (state2['my_turn'] and state2['in_hand']):
+                break                    # ход ушёл — решать по этому кадру нельзя
+            if [c for c in state2['hole'] if c] != hole:
+                break                    # другая раздача — старое решение не годится
+            if len(state2['raise_presets']) > len(state['raise_presets']):
+                live = sum(1 for p in state2['raise_presets'] if p['enabled'])
+                self.log(f'столбец раскрылся: строк {len(state2["raise_presets"])}, '
+                         f'из них живых {live}')
+                return state2, img2
+        self.log('столбец не раскрылся — играю пассивно (чек/колл)')
+        return state, img
+
     def resolve_tap(self, state, action, pot_frac=None):
         """Действие -> (действие, точка). Рейз без живой кнопки бета заменяем
         на колл/чек: тапать в пустоту или в погашенную кнопку хуже, чем сыграть
@@ -243,8 +310,14 @@ class Bot:
             self.hand_id += 1
             self.last_hole = hole
 
-        decision = strategy.decide(state, profile=self.opponent_profile(),
-                                   stack_bb=self.stack_bb, chart=self.chart)
+        decision = self.decide(state)
+        # свёрнутый столбец ставки: сначала раскрыть его шевроном, потом решать
+        # заново по перерисованному кадру — одно «действие» бота из двух тапов
+        if decision['action'] == 'raise' and self.wants_expand(state, decision.get('pot_frac')):
+            expanded, img = self.expand_presets(state, img)
+            if expanded is not state:
+                state = self.last_state = expanded
+                decision = self.decide(state)
         action, point = self.resolve_tap(state, decision['action'],
                                          decision.get('pot_frac'))
         reason = decision['reason']
@@ -421,8 +494,9 @@ class Bot:
                     acted_ts = time.time()
                     opp_acted = False    # свежий ход: ждём новый сигнал от оппонента
                     # сигнатура по состоянию, на котором РЕАЛЬНО сыграли (после
-                    # перечитывания карт оно могло измениться — иначе сыграем дважды)
-                    acted_sig = self._sig(state)
+                    # перечитывания карт и раскрытия столбца оно могло измениться —
+                    # иначе сыграем дважды)
+                    acted_sig = self._sig(self.last_state or state)
                 except subprocess.TimeoutExpired:
                     self.log('adb не ответил, пауза 3с')
                     time.sleep(3)

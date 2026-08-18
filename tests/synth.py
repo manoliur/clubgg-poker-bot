@@ -195,9 +195,24 @@ def draw_dealer(img, zone):
     cv2.putText(img, 'D', (cx - 10, cy + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (30, 30, 30), 2)
 
 
+def draw_chevron(img):
+    """Кнопка-шеврон «^» слева от столбца ставки (config.CHEVRON).
+
+    Ею столбец сворачивается и раскрывается; бот ищет её по жёлтой галке.
+    """
+    W, H = img.shape[1], img.shape[0]
+    cx, cy = config.scale(config.CHEVRON, W, H)
+    w, h = config.scale(config.CHEVRON_BOX, W, H)
+    _rounded_rect(img, cx - w // 2, cy - h // 2, cx + w // 2, cy + h // 2, BTN_GRAY, r=10)
+    arm, thick = w // 4, max(3, h // 8)
+    cv2.line(img, (cx - arm, cy + arm // 2), (cx, cy - arm // 2), YELLOW, thick)
+    cv2.line(img, (cx, cy - arm // 2), (cx + arm, cy + arm // 2), YELLOW, thick)
+
+
 def render(hole=None, board=None, buttons=True, call_amount=False,
            dealer='me', players=2, sitting_out=0, pot_bb=3.0, presets=0,
-           dim_presets=(), showdown=False, size=(config.REF_W, config.REF_H)):
+           dim_presets=(), chevron=False, showdown=False,
+           size=(config.REF_W, config.REF_H)):
     """Собрать кадр. hole/board — списки строк карт ('Ah'), None = рубашка.
 
     players — сколько игроков В РАЗДАЧЕ (включая героя), sitting_out — сколько
@@ -207,6 +222,8 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
     presets — сколько пресетов ставки нарисовать НАД кнопкой «Бет» (клиент
     показывает их, пока столбец раскрыт шевроном), dim_presets — номера
     погашенных строк столбца снизу вверх (0 — сама кнопка «Бет»).
+    chevron=True — нарисовать кнопку «^»; вместе с presets<3 это и есть
+    свёрнутый столбец, который бот должен сначала раскрыть.
     showdown=True — вскрытие: вместо кнопок действий ряд плашек «Показать» с
     лицами карт.
     """
@@ -287,6 +304,8 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
                 + config.PRESET_X[1:] + config.PRESET_ROWS[i][1:], W, H)
             draw_button(img, ((x0 + x1) // 2, (y0 + y1) // 2), x1 - x0, y1 - y0,
                         amount=str(i + 1), disabled=(i in dim_presets))
+        if chevron:
+            draw_chevron(img)
     return img
 
 

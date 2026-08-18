@@ -211,6 +211,36 @@ def raise_presets(img):
     return out
 
 
+def chevron_point(img):
+    """Кнопка «^» (свернуть/раскрыть столбец ставки): (x,y) или None, если её нет.
+
+    Опознаётся по жёлтой галке внутри тёмной плашки — единственное жёлтое пятно
+    в этом месте нижней полосы. На кадрах, где столбца ставки нет вовсе (остались
+    только «Фолд»/«Колл»), нет и шеврона: раскрывать тогда нечего.
+    """
+    H, W = img.shape[:2]
+    cx, cy = config.scale(config.CHEVRON, W, H)
+    dx, dy = config.scale(config.CHEVRON_BOX, W, H)
+    x0, y0 = max(0, cx - dx // 2), max(0, cy - dy // 2)
+    win = img[y0:min(H, cy + dy // 2), x0:min(W, cx + dx // 2)]
+    if win.size == 0:
+        return None
+    min_ink = config.CHEVRON_MIN_INK * W * H / (config.REF_W * config.REF_H)
+    return (cx, cy) if int((amber_mask(win) > 0).sum()) >= min_ink else None
+
+
+def presets_collapsed(presets, chevron):
+    """Свёрнут ли столбец ставки: кнопка есть, но строк меньше полного набора.
+
+    В свёрнутом виде клиент показывает ОДНУ кнопку «Бет»/«Рейз до» вместо
+    четырёх. Если она погашена (размер меньше минимальной ставки), поставить
+    нечем, пока столбец не раскрыт шевроном. Совсем пустой столбец (пресетов 0)
+    свёрнутым не считаем: ставить в такой раздаче нельзя вообще (олл-ин
+    оппонента), и шеврона там тоже нет.
+    """
+    return bool(presets) and len(presets) < len(config.PRESET_ROWS) and chevron is not None
+
+
 def is_my_turn(img):
     """Мой ход = в правой части нижней полосы есть хотя бы одна кнопка действия.
 
@@ -637,6 +667,7 @@ def read_state(img, tpl_dir=None):
     showdown = is_showdown(img)
     buttons = [] if showdown else detect_action_buttons(img)
     presets = [] if showdown else raise_presets(img)
+    chevron = None if showdown else chevron_point(img)
     my_turn = len(buttons) >= 1
     bet = has_bet(img)
     street = STREETS.get(len(board), 'unknown')
@@ -661,6 +692,8 @@ def read_state(img, tpl_dir=None):
         'buttons': buttons,
         'n_buttons': len(buttons),
         'raise_presets': presets,
+        'chevron': chevron,
+        'presets_collapsed': presets_collapsed(presets, chevron),
         'showdown': showdown,
         'has_bet': bet,
         'call_fp': call_amount_fp(img),

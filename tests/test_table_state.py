@@ -90,6 +90,40 @@ class RaisePresetsTest(unittest.TestCase):
         self.assertEqual(ts.raise_presets(synth.render(buttons=False)), [])
 
 
+class ChevronTest(unittest.TestCase):
+    """Шеврон «^» и свёрнутый столбец ставки (его надо раскрывать до ставки)."""
+
+    def test_chevron_found(self):
+        point = ts.chevron_point(synth.render(buttons=True, chevron=True))
+        self.assertIsNotNone(point)
+        W, H = config.REF_W, config.REF_H
+        self.assertEqual(point, config.scale(config.CHEVRON, W, H))
+
+    def test_no_chevron_no_point(self):
+        self.assertIsNone(ts.chevron_point(synth.render(buttons=True)))
+        self.assertIsNone(ts.chevron_point(synth.render(buttons=False)))
+
+    def test_collapsed_column_detected(self):
+        s = ts.read_state(synth.render(hole=['Ah', 'Kd'], buttons=True, chevron=True))
+        self.assertTrue(s['presets_collapsed'], 'одна кнопка вместо четырёх + шеврон')
+        self.assertEqual(len(s['raise_presets']), 1)
+
+    def test_expanded_column_is_not_collapsed(self):
+        s = ts.read_state(synth.render(hole=['Ah', 'Kd'], buttons=True, presets=3,
+                                       chevron=True))
+        self.assertFalse(s['presets_collapsed'], 'все четыре строки видны — раскрывать нечего')
+
+    def test_no_column_at_all_is_not_collapsed(self):
+        """Кнопки ставки нет вовсе (олл-ин оппонента) — раскрывать нечего."""
+        s = ts.read_state(synth.render(hole=['Ah', 'Kd'], buttons=False, chevron=True))
+        self.assertFalse(s['presets_collapsed'])
+
+    def test_showdown_has_no_chevron(self):
+        s = ts.read_state(synth.render(hole=['Ah', 'Kd'], showdown=True, chevron=True))
+        self.assertIsNone(s['chevron'])
+        self.assertFalse(s['presets_collapsed'])
+
+
 class ShowdownTest(unittest.TestCase):
     """Вскрытие: плашки «Показать» стоят на местах кнопок, но ходить там нельзя."""
 
