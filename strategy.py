@@ -11,7 +11,18 @@
 Записи диапазонов: 'AA', 'AKs', 'AKo', '22+', 'ATs+', 'A5o+', '76s+'.
 Знак '+' у коннекторов (разрыв 1) поднимает обе карты (76s+ = 76s,87s,...,KQs),
 у остальных — только младшую (K9s+ = K9s,KTs,KJs,KQs).
+
+Чарты
+-----
+Диапазоны и размеры ставок можно не править в коде, а подгружать файлом:
+    python strategy.py --load-chart charts/6max_standard.json AhKd
+    strategy.use_chart(strategy.load_chart('charts/6max_tight.json'))
+Формат — JSON или CSV, см. README.md. Встроенные таблицы ниже остаются чартом
+по умолчанию, файл переопределяет только те ключи, что в нём есть.
 """
+import json
+import os
+
 import hand_evaluator as he
 from hand_evaluator import RANK_VALUE, VALUE_RANK
 
@@ -65,6 +76,20 @@ THREE_BET_MULT = 3.0        # 3-бет = 3x предыдущего рейза
 CBET_POT = 0.6              # ставка на велью, доля банка
 SEMI_BLUFF_POT = 0.45       # полу-блеф с дро
 
+# Настройки розыгрыша (их переопределяет секция "postflop" чарта).
+DEFAULT_SETTINGS = {
+    'open_size_bb': OPEN_SIZE_BB,
+    'three_bet_mult': THREE_BET_MULT,
+    'cbet_pot': CBET_POT,
+    'semi_bluff_pot': SEMI_BLUFF_POT,
+    'aggression': 1.0,          # общий множитель размеров ставок
+    'medium_max_price': 0.40,   # дороже — средняя рука пасует
+    'draw_min_equity': 0.33,    # эквити дро, при котором коллим вслепую
+    'cheap_price': 0.12,        # цена, за которую смотрим следующую карту с чем угодно
+    'max_call_stack_frac': 0.20,  # префлоп-колл дороже доли стека — только с премиумом
+    'preflop_max_price': 0.45,  # префлоп: цена колла в долях банка
+}
+
 
 # --------------------------------------------------------------------------
 # разбор рук и диапазонов
@@ -115,11 +140,12 @@ def _expand_token(token):
 
 
 def parse_range(spec):
-    """'22+, ATs+, KQs' -> множество кодов рук."""
+    """'22+, ATs+, KQs' или ['AA','AKs'] -> множество кодов рук."""
     if isinstance(spec, (set, frozenset)):
         return spec
+    tokens = spec if isinstance(spec, (list, tuple)) else spec.split(',')
     out = set()
-    for token in spec.split(','):
+    for token in tokens:
         out |= _expand_token(token)
     return out
 
@@ -127,9 +153,17 @@ def parse_range(spec):
 _RANGE_CACHE = {}
 
 
+def _cache_key(spec):
+    if isinstance(spec, str):
+        return spec
+    return frozenset(spec)
+
+
 def in_range(hole, spec):
     """Рука входит в диапазон?"""
-    key = spec if isinstance(spec, str) else id(spec)
+    if not spec:
+        return False
+    key = _cache_key(spec)
     rng = _RANGE_CACHE.get(key)
     if rng is None:
         rng = _RANGE_CACHE[key] = parse_range(spec)
@@ -153,15 +187,135 @@ def chen_score(hole):
     return round(score * 2) / 2
 
 
-def range_for(position, players, kind='open'):
-    """Диапазон для позиции: хедз-ап отдельный, иначе 6-max таблицы."""
-    table = OPEN_RANGES if kind == 'open' else CALL_RANGES
-    if players is not None and players <= 2:
-        key = 'HU_SB' if position in (None, 'SB', 'BTN') else 'HU_BB'
-        return table.get(key)
-    if position in table:
-        return table[position]
-    return table.get('MP')                                  # неизвестная позиция — средняя
+# --------------------------------------------------------------------------
+# чарты: загружаемые наборы диапазонов и настроек
+# --------------------------------------------------------------------------
+def _pos_key(name):
+    """'UTG+1' -> 'utg1', 'HU_SB' -> 'husb' — ключ позиции, нечувствительный к записи."""
+    return ''.join(c for c in str(name).lower() if c.isalnum())
+
+
+def _pos_table(src):
+    """{'UTG': '22+', ...} -> {'utg': '22+', ...} с проверкой записей."""
+    out = {}
+    for pos, spec in (src or {}).items():
+        key = _pos_key(pos)
+        parse_range(spec)                                   # упасть сразу на кривой записи
+        out[key] = spec
+    return out
+
+
+class Chart:
+    """Набор правил: диапазоны по позициям + размеры ставок.
+
+    Всё, чего в файле нет, берётся из встроенных таблиц, поэтому чарт может
+    переопределять хоть одну позицию.
+    """
+
+    def __init__(self, data=None, name=None, path=None):
+        data = data or {}
+        self.path = path
+        self.name = name or data.get('name') or (os.path.basename(path) if path
+                                                 else 'встроенный')
+        self.open = {**_pos_table(OPEN_RANGES), **_pos_table(data.get('open'))}
+        self.call = {**_pos_table(CALL_RANGES), **_pos_table(data.get('call'))}
+        self.three_bet = data.get('three_bet', THREE_BET_VALUE)
+        self.three_bet_hu = data.get('three_bet_hu', THREE_BET_VALUE_HU)
+        self.four_bet = data.get('four_bet', FOUR_BET)
+        self.premium = data.get('premium', PREMIUM)
+        self.settings = {**DEFAULT_SETTINGS, **(data.get('postflop') or {})}
+        for spec in (self.three_bet, self.three_bet_hu, self.four_bet, self.premium):
+            parse_range(spec)
+
+    def range_for(self, position, players, kind='open'):
+        """Диапазон для позиции: хедз-ап отдельный, иначе 6-max таблицы."""
+        table = self.open if kind == 'open' else self.call
+        if players is not None and players <= 2:
+            key = 'husb' if position in (None, 'SB', 'BTN') else 'hubb'
+            return table.get(key)
+        return table.get(_pos_key(position)) or table.get('mp')   # неизвестная — средняя
+
+    def size(self, key):
+        """Размер ставки с учётом общей агрессии чарта."""
+        return self.settings[key] * self.settings['aggression']
+
+    def describe(self):
+        lines = [f'чарт: {self.name}' + (f' ({self.path})' if self.path else '')]
+        for kind, table in (('открытие', self.open), ('колл', self.call)):
+            for pos in ('utg', 'utg1', 'mp', 'mp1', 'hj', 'co', 'btn', 'sb', 'bb',
+                        'husb', 'hubb'):
+                if pos in table:
+                    lines.append(f'  {kind:9} {pos.upper():5} {table[pos]}')
+        lines.append(f'  3-бет     {self.three_bet} | HU {self.three_bet_hu}')
+        lines.append(f'  4-бет     {self.four_bet}')
+        lines.append('  размеры   ' + ', '.join(f'{k}={v}' for k, v in self.settings.items()))
+        return '\n'.join(lines)
+
+
+DEFAULT_CHART = Chart()
+_ACTIVE = DEFAULT_CHART
+
+
+def active_chart():
+    return _ACTIVE
+
+
+def use_chart(chart):
+    """Сделать чарт активным для всех последующих решений. Возвращает прежний."""
+    global _ACTIVE
+    prev, _ACTIVE = _ACTIVE, chart or DEFAULT_CHART
+    return prev
+
+
+def _chart_from_csv(text):
+    """CSV: строки «позиция;рука рука рука» (разделитель , ; или таб).
+
+    Секции open/call задаются первым столбцом «open»/«call»; без него всё
+    считается диапазонами открытия.
+    """
+    data = {'open': {}, 'call': {}}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = [p.strip() for p in line.replace('\t', ';').replace(',', ';').split(';')]
+        parts = [p for p in parts if p]
+        kind = 'open'
+        if parts and parts[0].lower() in ('open', 'call'):
+            kind, parts = parts[0].lower(), parts[1:]
+        if len(parts) < 2:
+            continue
+        if parts[0].lower() in ('position', 'позиция'):
+            continue
+        data[kind][parts[0]] = parts[1:]
+    return data
+
+
+def load_chart(path):
+    """Прочитать чарт из JSON или CSV. Кидает ValueError на кривом файле."""
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    if path.lower().endswith('.csv'):
+        data = _chart_from_csv(text)
+    else:
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise ValueError(f'{path}: не разбирается JSON: {e}') from e
+    if not isinstance(data, dict):
+        raise ValueError(f'{path}: ожидался объект с ключами open/call/postflop')
+    # чарт без секций open/call — это плоская таблица только для открытия
+    if not any(k in data for k in ('open', 'call', 'postflop', 'three_bet', 'four_bet')):
+        data = {'open': data}
+    try:
+        return Chart(data, path=path)
+    except ValueError as e:
+        raise ValueError(f'{path}: {e}') from e
+
+
+def range_for(position, players, kind='open', chart=None):
+    """Диапазон для позиции по активному (или переданному) чарту."""
+    return (chart or _ACTIVE).range_for(position, players, kind)
 
 
 # --------------------------------------------------------------------------
@@ -182,35 +336,42 @@ def _d(action, reason, amount=None):
 # --------------------------------------------------------------------------
 # префлоп
 # --------------------------------------------------------------------------
-def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb):
+def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb, chart=None):
+    chart = chart or _ACTIVE
+    st = chart.settings
     code = hand_code(hole)
     hu = players is not None and players <= 2
-    open_rng = range_for(position, players, 'open')
-    call_rng = range_for(position, players, 'call')
-    value3bet = THREE_BET_VALUE_HU if hu else THREE_BET_VALUE
+    open_rng = chart.range_for(position, players, 'open')
+    call_rng = chart.range_for(position, players, 'call')
+    value3bet = chart.three_bet_hu if hu else chart.three_bet
+    open_size = chart.size('open_size_bb')
+    mult = st['three_bet_mult']
 
     if not has_bet:
         # никто не поставил: открываемся рейзом или чекаем (мы в ББ)
         if in_range(hole, open_rng):
             return _d('raise', f'{code}: открытие с {position or "?"} '
-                               f'(диапазон {"HU" if hu else "6-max"})', OPEN_SIZE_BB)
+                               f'(диапазон {"HU" if hu else "6-max"}, {chart.name})', open_size)
         return _d('check', f'{code}: вне диапазона открытия, но чек бесплатный')
 
     # перед нами ставка
-    if in_range(hole, FOUR_BET):
+    if in_range(hole, chart.four_bet):
         return _d('raise', f'{code}: премиум — 4-бет/олл-ин',
-                  max(OPEN_SIZE_BB * 3, (to_call_bb or OPEN_SIZE_BB) * THREE_BET_MULT))
+                  max(open_size * 3, (to_call_bb or open_size) * mult))
     if in_range(hole, value3bet):
-        return _d('raise', f'{code}: 3-бет на велью',
-                  (to_call_bb or OPEN_SIZE_BB) * THREE_BET_MULT)
+        return _d('raise', f'{code}: 3-бет на велью', (to_call_bb or open_size) * mult)
 
     price = pot_odds(to_call_bb, pot_bb)
     if in_range(hole, call_rng):
-        if to_call_bb is not None and to_call_bb > 0.20 * stack_bb and not in_range(hole, PREMIUM):
-            return _d('fold', f'{code}: колл {to_call_bb}ББ — больше 20% стека, без премиума')
+        cap = st['max_call_stack_frac']
+        if to_call_bb is not None and to_call_bb > cap * stack_bb \
+                and not in_range(hole, chart.premium):
+            return _d('fold', f'{code}: колл {to_call_bb}ББ — больше {cap:.0%} стека, '
+                              'без премиума')
         # префлоп цена колла обычно 30-40% банка — это нормально (имплайд-оддсы),
         # отказываемся только от совсем безнадёжной цены
-        if price is not None and price > 0.45 and not in_range(hole, PREMIUM):
+        if price is not None and price > st['preflop_max_price'] \
+                and not in_range(hole, chart.premium):
             return _d('fold', f'{code}: цена {price:.0%} банка слишком высока')
         return _d('call', f'{code}: колл по диапазону {position or "?"}')
     return _d('fold', f'{code}: вне диапазона на {position or "?"}')
@@ -219,51 +380,54 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
 # --------------------------------------------------------------------------
 # постфлоп
 # --------------------------------------------------------------------------
-def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players):
+def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
+                    chart=None):
+    chart = chart or _ACTIVE
+    st = chart.settings
     cls = he.hand_class(hole, board)
     made, outs, draws = cls['made'], cls['outs'], cls['draws']
     name = cls['name'] or '?'
     price = pot_odds(to_call_bb, pot_bb)
     equity = he.equity_from_outs(outs, street)
     hu = players is not None and players <= 2
+    cbet, semi = chart.size('cbet_pot'), chart.size('semi_bluff_pot')
 
     if has_bet:
         if made in ('nuts', 'strong'):
-            return _d('raise', f'{name}: рейз на велью', _bet_size(pot_bb, CBET_POT * 1.5))
+            return _d('raise', f'{name}: рейз на велью', _bet_size(pot_bb, cbet * 1.5))
         if made == 'medium':
-            if price is not None and price > 0.4:
+            if price is not None and price > st['medium_max_price']:
                 return _d('fold', f'{name}: цена {price:.0%} банка слишком высока для средней руки')
             return _d('call', f'{name}: колл со средней рукой')
         if made == 'draw' or draws:
             if price is None:
                 # чисел нет: считаем ставку полубанком (цена ~33%)
                 return (_d('call', f'дро {draws}, {outs} аутов (~{equity:.0%}) — колл по аутам')
-                        if equity >= 0.33 else _d('fold', f'дро {draws}: {outs} аутов мало'))
+                        if equity >= st['draw_min_equity']
+                        else _d('fold', f'дро {draws}: {outs} аутов мало'))
             if equity > price:
                 return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > цены {price:.0%}')
             if street == 'flop' and 'flush' in draws and hu:
-                return _d('raise', f'сильное дро {draws}: полу-блеф',
-                          _bet_size(pot_bb, SEMI_BLUFF_POT))
+                return _d('raise', f'сильное дро {draws}: полу-блеф', _bet_size(pot_bb, semi))
             return _d('fold', f'дро {draws}: {equity:.0%} < цены {price:.0%}')
-        if price is not None and price < 0.12 and street != 'river':
+        if price is not None and price < st['cheap_price'] and street != 'river':
             return _d('call', f'{name}: дёшево ({price:.0%}) — смотрим следующую карту')
         return _d('fold', f'{name}: нечем продолжать')
 
     # нам чекнули / мы первые
     if made in ('nuts', 'strong'):
-        return _d('raise', f'{name}: ставка на велью', _bet_size(pot_bb, CBET_POT))
+        return _d('raise', f'{name}: ставка на велью', _bet_size(pot_bb, cbet))
     if made == 'medium':
         if street == 'flop':
-            return _d('raise', f'{name}: конт-бет', _bet_size(pot_bb, CBET_POT * 0.8))
+            return _d('raise', f'{name}: конт-бет', _bet_size(pot_bb, cbet * 0.8))
         return _d('check', f'{name}: контроль банка на {street}')
     if made == 'draw' or draws:
         if street in ('flop', 'turn') and hu:
             return _d('raise', f'дро {draws} ({outs} аутов): полу-блеф',
-                      _bet_size(pot_bb, SEMI_BLUFF_POT))
+                      _bet_size(pot_bb, semi))
         return _d('check', f'дро {draws}: смотрим карту бесплатно')
     if street == 'flop' and hu:
-        return _d('raise', 'воздух: конт-бет один раз в хедз-апе',
-                  _bet_size(pot_bb, SEMI_BLUFF_POT))
+        return _d('raise', 'воздух: конт-бет один раз в хедз-апе', _bet_size(pot_bb, semi))
     return _d('check', f'{name}: чек')
 
 
@@ -290,12 +454,14 @@ def adjust_for_opponent(decision, profile, made):
     return decision
 
 
-def decide(state, profile=None, stack_bb=100.0):
+def decide(state, profile=None, stack_bb=100.0, chart=None):
     """Главная функция: состояние стола -> решение.
 
     Ожидает ключи state: hole, board, street, has_bet, to_call_bb, pot_bb,
-    position, players. Неизвестные числа (None) допустимы.
+    position, players. Неизвестные числа (None) допустимы. chart — загруженный
+    набор правил (по умолчанию активный, см. use_chart).
     """
+    chart = chart or _ACTIVE
     hole = [c for c in (state.get('hole') or []) if c]
     board = [c for c in (state.get('board') or []) if c]
     has_bet = bool(state.get('has_bet'))
@@ -313,11 +479,12 @@ def decide(state, profile=None, stack_bb=100.0):
 
     try:
         if street == 'preflop' or not board:
-            decision = decide_preflop(hole, position, players, has_bet, to_call, pot, stack_bb)
+            decision = decide_preflop(hole, position, players, has_bet, to_call, pot,
+                                      stack_bb, chart)
             made = 'preflop'
         else:
             decision = decide_postflop(hole, board, street, has_bet, to_call, pot,
-                                       stack_bb, players)
+                                       stack_bb, players, chart)
             made = he.hand_class(hole, board)['made']
     except (he.BadCard, ValueError) as e:
         return _d('check' if not has_bet else 'fold', f'ошибка разбора карт: {e}')
@@ -331,11 +498,40 @@ def decide(state, profile=None, stack_bb=100.0):
     return decision
 
 
-if __name__ == '__main__':
-    import sys
-    import json
-    demo = {'hole': sys.argv[1:3] or ['Ah', 'Kd'], 'board': sys.argv[3:], 'players': 2,
-            'position': 'SB', 'has_bet': False, 'pot_bb': 3.0, 'to_call_bb': None}
+def main(argv=None):
+    """CLI: загрузить чарт и/или принять решение по руке.
+
+        python strategy.py --load-chart charts/6max_standard.json
+        python strategy.py --load-chart charts/6max_tight.json Ah Kd Qc 7s 2d
+        python strategy.py --position BTN --players 6 Ah Kd
+    """
+    import argparse
+    ap = argparse.ArgumentParser(description='Табличная стратегия NLH (без ИИ)')
+    ap.add_argument('--load-chart', help='файл чарта (JSON/CSV) из папки charts/')
+    ap.add_argument('--position', default='SB', help='позиция героя (BTN/SB/BB/UTG/MP/CO)')
+    ap.add_argument('--players', type=int, default=2, help='игроков в раздаче (2..6)')
+    ap.add_argument('--pot', type=float, default=3.0, help='банк в ББ')
+    ap.add_argument('--to-call', type=float, help='сумма колла в ББ (есть ставка)')
+    ap.add_argument('cards', nargs='*', help='2 карманные карты, затем доска: Ah Kd 7c 2s 9d')
+    args = ap.parse_args(argv)
+
+    if args.load_chart:
+        chart = load_chart(args.load_chart)
+        use_chart(chart)
+        print(chart.describe())
+        if not args.cards:
+            return 0
+
+    cards = args.cards or ['Ah', 'Kd']
+    demo = {'hole': cards[:2], 'board': cards[2:], 'players': args.players,
+            'position': args.position, 'has_bet': args.to_call is not None,
+            'pot_bb': args.pot, 'to_call_bb': args.to_call}
     demo['street'] = {0: 'preflop', 3: 'flop', 4: 'turn', 5: 'river'}.get(len(demo['board']),
                                                                          'preflop')
     print(json.dumps(decide(demo), ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(main())

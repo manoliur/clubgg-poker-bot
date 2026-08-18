@@ -1,0 +1,53 @@
+{
+  "name": "6-max стандарт (ТАГ)",
+  "open": {
+    "UTG":   ["22+", "ATs+", "AJo+", "KQs", "QJs"],
+    "UTG+1": ["22+", "ATs+", "AJo+", "KQs", "QJs", "JTs"],
+    "MP":    ["22+", "A9s+", "ATo+", "KTs+", "QTs+", "JTs"],
+    "MP+1":  ["22+", "A9s+", "ATo+", "KTs+", "QTs+", "JTs", "T9s"],
+    "HJ":    ["22+", "A8s+", "ATo+", "KTs+", "QTs+", "JTs", "T9s", "98s"],
+    "CO":    ["22+", "A7s+", "A9o+", "K9s+", "KJo+", "Q9s+", "QJo", "J9s+", "T9s", "98s"],
+    "BTN":   ["22+", "A2s+", "A8o+", "K8s+", "KTo+", "Q8s+", "QTo+", "J8s+", "JTo", "T8s+",
+              "97s+", "87s", "76s", "65s"],
+    "SB":    ["22+", "A2s+", "A7o+", "K7s+", "K9o+", "Q8s+", "QTo+", "J8s+", "JTo", "T8s+",
+              "97s+", "87s", "76s", "65s"],
+    "BB":    ["22+", "A2s+", "A7o+", "K7s+", "K9o+", "Q8s+", "QTo+", "J8s+", "T8s+",
+              "97s+", "87s", "76s"],
+    "HU_SB": ["22+", "A2s+", "A2o+", "K2s+", "K5o+", "Q4s+", "Q8o+", "J6s+", "J8o+",
+              "T6s+", "T8o+", "96s+", "98o", "85s+", "75s+", "64s+", "54s", "43s"],
+    "HU_BB": ["22+", "A2s+", "A2o+", "K2s+", "K4o+", "Q4s+", "Q7o+", "J5s+", "J8o+",
+              "T6s+", "T8o+", "95s+", "97o+", "85s+", "74s+", "64s+", "53s+", "43s"]
+  },
+  "call": {
+    "UTG":   ["22+", "AQs+", "AKo", "KQs"],
+    "UTG+1": ["22+", "AJs+", "AQo+", "KQs"],
+    "MP":    ["22+", "ATs+", "AQo+", "KJs+", "QJs"],
+    "MP+1":  ["22+", "ATs+", "AQo+", "KJs+", "QJs"],
+    "HJ":    ["22+", "A9s+", "AJo+", "KTs+", "QJs", "JTs"],
+    "CO":    ["22+", "A8s+", "AJo+", "KTs+", "QTs+", "JTs", "T9s"],
+    "BTN":   ["22+", "A5s+", "ATo+", "K9s+", "KQo", "Q9s+", "J9s+", "T9s", "98s", "87s"],
+    "SB":    ["22+", "A8s+", "ATo+", "KTs+", "KQo", "QTs+", "JTs", "T9s"],
+    "BB":    ["22+", "A2s+", "A9o+", "K8s+", "KTo+", "Q9s+", "QJo", "J9s+", "T9s", "98s",
+              "87s", "76s", "65s"],
+    "HU_SB": ["22+", "A2s+", "A5o+", "K5s+", "K8o+", "Q7s+", "QTo+", "J8s+", "JTo", "T8s+",
+              "98s", "87s", "76s"],
+    "HU_BB": ["22+", "A2s+", "A2o+", "K3s+", "K7o+", "Q6s+", "Q9o+", "J7s+", "J9o+", "T7s+",
+              "T9o", "96s+", "86s+", "75s+", "65s", "54s"]
+  },
+  "three_bet": ["TT+", "AQs+", "AKo"],
+  "three_bet_hu": ["77+", "ATs+", "AQo+", "KQs"],
+  "four_bet": ["QQ+", "AKs", "AKo"],
+  "premium": ["JJ+", "AQs+", "AKo"],
+  "postflop": {
+    "open_size_bb": 2.5,
+    "three_bet_mult": 3.0,
+    "cbet_pot": 0.6,
+    "semi_bluff_pot": 0.45,
+    "aggression": 1.0,
+    "medium_max_price": 0.40,
+    "draw_min_equity": 0.33,
+    "cheap_price": 0.12,
+    "max_call_stack_frac": 0.20,
+    "preflop_max_price": 0.45
+  }
+}

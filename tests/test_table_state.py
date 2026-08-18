@@ -66,9 +66,32 @@ class DealerAndPlayersTest(unittest.TestCase):
         self.assertIsNone(ts.find_dealer(synth.render(dealer=None)))
 
     def test_player_count(self):
-        for n in (2, 3, 5, 6, 9):
-            count, occupied, scores = ts.count_players(synth.render(players=n))
-            self.assertEqual(count, n, f'мест занято {occupied}, оценки {scores}')
+        for n in (2, 3, 4, 5, 6):
+            count, occupied, panels = ts.count_players(synth.render(players=n))
+            self.assertEqual(count, n, f'мест занято {occupied}, плашек {len(panels)}')
+
+    def test_sitting_out_players_not_counted(self):
+        """Занятое место без карт («Вне игры», 0 ББ) в раздаче не участвует."""
+        img = synth.render(players=2, sitting_out=2)
+        count, _, panels = ts.count_players(img)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(panels), 4, 'плашки видны все, но в раздаче только две')
+
+    def test_seats_ordered_clockwise_from_hero(self):
+        panels = ts.player_panels_ordered(synth.render(players=6))
+        self.assertEqual(len(panels), 6)
+        self.assertTrue(panels[0]['is_hero'], 'герой открывает круг')
+        # круг идёт по часовой стрелке: сначала места слева от героя, потом верх, потом справа
+        self.assertLess(panels[1]['y'], panels[0]['y'])
+        self.assertEqual(min(range(6), key=lambda i: panels[i]['y']), 3, 'верх стола — третий')
+        self.assertGreater(panels[5]['x'], panels[1]['x'], 'последнее место — справа')
+
+    def test_dealer_seat_matches_panel(self):
+        for seat in range(5):
+            d = ts.find_dealer(synth.render(players=6, dealer=seat))
+            self.assertIsNotNone(d, seat)
+            self.assertEqual(d['where'], 'opp', seat)
+            self.assertEqual(d['seat'], seat)
 
 
 class PositionLogicTest(unittest.TestCase):
@@ -166,6 +189,48 @@ class ReadStateTest(unittest.TestCase):
         s = self.state(hole=['Ah', 'Kd'], players=6, dealer='me')
         self.assertEqual(s['players'], 6)
         self.assertEqual(s['position'], 'BTN')
+
+    def test_positions_for_three_to_six_players(self):
+        """Позиция героя по кнопке D для любого числа игроков (2..6).
+
+        Место N = N-е по часовой стрелке от героя. Дилер на месте 0 (сразу за
+        героем) -> герой в хвосте (CO/BB), дилер на последнем месте -> герой SB.
+        """
+        expected = {
+            (3, 'me'): 'BTN', (3, 0): 'BB', (3, 1): 'SB',
+            (4, 'me'): 'BTN', (4, 0): 'CO', (4, 1): 'BB', (4, 2): 'SB',
+            (5, 'me'): 'BTN', (5, 0): 'CO', (5, 1): 'UTG', (5, 2): 'BB', (5, 3): 'SB',
+            (6, 'me'): 'BTN', (6, 0): 'CO', (6, 1): 'MP', (6, 2): 'UTG',
+            (6, 3): 'BB', (6, 4): 'SB',
+        }
+        for (players, dealer), pos in expected.items():
+            s = self.state(hole=['Ah', 'Kd'], players=players, dealer=dealer)
+            self.assertEqual(s['players'], players, (players, dealer))
+            self.assertEqual(s['position'], pos, (players, dealer))
+
+    def test_first_to_act_for_three_to_six_players(self):
+        """Префлоп говорит первым UTG (третий после D), постфлоп — SB (первый после D).
+
+        Исключение — 3 игрока: за тремя (BTN/SB/BB) префлоп первым ходит сам BTN.
+        """
+        for players in (3, 4, 5, 6):
+            # герой на баттоне: первым и до, и после флопа говорит не он
+            # (при 3 игроках префлоп первым ходит сам баттон = герой)
+            s = self.state(hole=['Ah', 'Kd'], players=players, dealer='me')
+            self.assertEqual(s['first_to_act'], 'me' if players == 3 else 'opp', players)
+            # дилер на последнем месте круга -> герой SB -> постфлоп первым ходит он
+            s = self.state(hole=['Ah', 'Kd'], players=players, dealer=players - 2,
+                           board=['Ad', 'Kc', '2h'])
+            self.assertEqual(s['position'], 'SB', players)
+            self.assertEqual(s['first_to_act'], 'me', players)
+
+    def test_sitting_out_player_does_not_shift_position(self):
+        """Игрок вне раздачи не участвует в круге позиций."""
+        s = self.state(hole=['Ah', 'Kd'], players=3, dealer=1, sitting_out=2)
+        self.assertEqual(s['players'], 3)
+        self.assertEqual(s['players_seated'], 5)
+        # 3 в раздаче: BTN=опп1(дилер), SB=герой, BB=опп0
+        self.assertEqual(s['position'], 'SB')
 
     def test_full_board_read_at_six_max(self):
         """Панели игроков по краям заходят на зону доски — карты всё равно читаются."""

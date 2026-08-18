@@ -10,6 +10,7 @@
     python main.py --once          # один проход (проверка)
     python main.py --max-actions 20                # сыграть 20 решений и выйти
     python main.py --image shots/turn_191709.png   # разбор кадра из файла
+    python main.py --chart charts/6max_tight.json  # играть по загруженному чарту
 
 Лог решений: bot.log, история раздач: hand_history.jsonl
 """
@@ -76,11 +77,12 @@ class FileScreen:
 # --------------------------------------------------------------------------
 class Bot:
     def __init__(self, screen, dry_run=False, stack_bb=69.6, players_db=None,
-                 tpl_dir=None, log_path=None, history_path=None):
+                 tpl_dir=None, log_path=None, history_path=None, chart=None):
         self.screen = screen
         self.dry_run = dry_run
         self.stack_bb = stack_bb
         self.players_db = players_db or {}
+        self.chart = chart or strategy.active_chart()
         self.tpl_dir = tpl_dir
         self.log_path = log_path or config.LOG_FILE
         self.history_path = history_path or config.HAND_HISTORY
@@ -162,7 +164,7 @@ class Bot:
             self.last_hole = hole
 
         decision = strategy.decide(state, profile=self.opponent_profile(),
-                                   stack_bb=self.stack_bb)
+                                   stack_bb=self.stack_bb, chart=self.chart)
         action, point = self.resolve_tap(state, decision['action'])
         reason = decision['reason']
         amount = decision['amount_bb']
@@ -177,6 +179,7 @@ class Bot:
             'hole': state['hole'],
             'board': state['board'],
             'players': state['players'],
+            'players_seated': state['players_seated'],
             'position': state['position'],
             'dealer': state['dealer'],
             'first_to_act': state['first_to_act'],
@@ -295,14 +298,24 @@ def main(argv=None):
     ap.add_argument('--adb', help=f'путь к adb (по умолчанию {config.ADB})')
     ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
     ap.add_argument('--templates', help=f'папка эталонов (по умолчанию {config.TEMPLATES_DIR})')
+    ap.add_argument('--chart', help='файл чарта стратегии (charts/6max_standard.json)')
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, 'reconfigure'):    # русский лог в консоли Windows (cp866)
         sys.stdout.reconfigure(errors='replace')
 
+    chart = None
+    if args.chart:
+        try:
+            chart = strategy.load_chart(args.chart)
+        except (OSError, ValueError) as e:
+            print(f'ERR: чарт не загружен: {e}')
+            return 2
+        print(f'чарт: {chart.name} ({args.chart})')
+
     screen = (FileScreen(args.image) if args.image
               else AdbScreen(adb=args.adb, serial=args.serial))
     bot = Bot(screen, dry_run=args.dry_run or bool(args.image), stack_bb=args.stack,
-              players_db=load_players_db(), tpl_dir=args.templates)
+              players_db=load_players_db(), tpl_dir=args.templates, chart=chart)
     if args.image or args.once:
         entry = bot.step()
         if entry is not None:

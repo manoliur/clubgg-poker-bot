@@ -1,0 +1,43 @@
+{
+  "name": "6-max тайтовый (нит)",
+  "open": {
+    "UTG":   ["77+", "AJs+", "AQo+", "KQs"],
+    "UTG+1": ["77+", "AJs+", "AQo+", "KQs"],
+    "MP":    ["66+", "ATs+", "AJo+", "KJs+", "QJs"],
+    "MP+1":  ["55+", "ATs+", "AJo+", "KJs+", "QJs"],
+    "HJ":    ["44+", "A9s+", "ATo+", "KTs+", "QJs", "JTs"],
+    "CO":    ["33+", "A8s+", "ATo+", "KTs+", "QTs+", "JTs", "T9s"],
+    "BTN":   ["22+", "A5s+", "A9o+", "K9s+", "KJo+", "Q9s+", "QJo", "J9s+", "T9s", "98s"],
+    "SB":    ["22+", "A5s+", "A9o+", "K9s+", "KJo+", "Q9s+", "QJo", "J9s+", "T9s"],
+    "BB":    ["22+", "A7s+", "ATo+", "K9s+", "KJo+", "QTs+", "JTs"],
+    "HU_SB": ["22+", "A2s+", "A5o+", "K5s+", "K9o+", "Q7s+", "QTo+", "J8s+", "JTo",
+              "T8s+", "97s+", "87s", "76s"],
+    "HU_BB": ["22+", "A2s+", "A7o+", "K5s+", "K9o+", "Q8s+", "QTo+", "J8s+", "T8s+", "98s"]
+  },
+  "call": {
+    "UTG":   ["77+", "AQs+", "AKo"],
+    "UTG+1": ["77+", "AQs+", "AKo"],
+    "MP":    ["66+", "AJs+", "AQo+", "KQs"],
+    "MP+1":  ["66+", "AJs+", "AQo+", "KQs"],
+    "HJ":    ["55+", "ATs+", "AQo+", "KJs+"],
+    "CO":    ["44+", "ATs+", "AJo+", "KJs+", "QJs"],
+    "BTN":   ["22+", "A9s+", "AJo+", "KTs+", "QJs", "JTs"],
+    "SB":    ["22+", "ATs+", "AJo+", "KJs+", "QJs"],
+    "BB":    ["22+", "A8s+", "ATo+", "K9s+", "KJo+", "QTs+", "JTs", "T9s"],
+    "HU_SB": ["22+", "A2s+", "A8o+", "K7s+", "KTo+", "Q9s+", "QJo", "J9s+", "T9s"],
+    "HU_BB": ["22+", "A2s+", "A5o+", "K5s+", "K9o+", "Q8s+", "QTo+", "J8s+", "T8s+", "98s"]
+  },
+  "three_bet": ["JJ+", "AKs", "AKo"],
+  "three_bet_hu": ["99+", "AJs+", "AKo", "KQs"],
+  "four_bet": ["KK+", "AKs"],
+  "premium": ["QQ+", "AKs", "AKo"],
+  "postflop": {
+    "open_size_bb": 3.0,
+    "cbet_pot": 0.55,
+    "semi_bluff_pot": 0.35,
+    "aggression": 0.9,
+    "medium_max_price": 0.33,
+    "max_call_stack_frac": 0.15,
+    "preflop_max_price": 0.40
+  }
+}

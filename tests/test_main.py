@@ -305,10 +305,11 @@ class SoakTest(unittest.TestCase):
             deck = rnd.sample(cards, 7)
             n_board = rnd.choice([0, 3, 4, 5])
             hole, board = deck[:2], deck[2:2 + n_board]
-            players = rnd.randint(2, 9)
+            players = rnd.randint(2, config.MAX_PLAYERS)
             bet = rnd.choice([True, False])
             frame = synth.render(hole=hole, board=board, buttons=True, call_amount=bet,
-                                 dealer=rnd.choice(['me', 'opp']), players=players)
+                                 dealer=rnd.choice(['me'] + list(range(players - 1))),
+                                 players=players, sitting_out=rnd.choice([0, 0, 1]))
             screen = FakeScreen([frame])
             bot = Bot(screen, tpl_dir=self.tpl,
                       log_path=os.path.join(self.tmp, 'soak.log'),
