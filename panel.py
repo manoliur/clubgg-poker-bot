@@ -249,12 +249,12 @@ async function api(path, method, body){
 async function refresh(){
   const data = await api('/api/devices');
   const el = document.getElementById('list');
-  el.innerHTML = data.map(d => `
-   <div class="dev"><h2>${d.name||d.serial}
+  el.innerHTML = (data.devices||[]).map(d => `
+   <div class="dev" data-serial="${d.serial}"><h2>${d.name||d.serial}
      <span class="badge ${d.online?'on':'off'}">${d.online?'в сети':'нет связи'}</span>
      <span class="badge ${d.running?'on':'off'}">${d.running?'ИГРАЕТ':'остановлен'}</span></h2>
    <div class="row"><label>Чарт</label>
-     <select data-k="chart">${data.charts.map(c =>
+     <select data-k="chart">${(data.charts||[]).map(c =>
        `<option ${d.chart==='charts/'+c?'selected':''}>charts/${c}</option>`).join('')}</select>
      <label>Агрессия</label><input type="range" data-k="aggression" min="0.5" max="2" step="0.1" value="${d.aggression}">
      <span id="agg_${d.serial}">${d.aggression}</span>
@@ -269,13 +269,12 @@ async function refresh(){
    <pre class="log">${(d.log||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre>
   </div>`).join('');
   document.querySelectorAll('.dev').forEach(dev => {
-    const serial = dev.querySelector('button').dataset.serial || dev.querySelector('h2').textContent.trim().split(' ')[0];
-    dev.querySelectorAll('[data-k]').forEach(i => i.dataset.serial = serial);
+    const serial = dev.dataset.serial;
     dev.querySelectorAll('button[data-a]').forEach(b => {
       b.dataset.serial = serial;
       b.onclick = async () => {
         if (b.dataset.a === 'save'){
-          const cfg = {serial, name: serial};
+          const cfg = {serial, name: dev.querySelector('h2').textContent.trim()};
           dev.querySelectorAll('[data-k]').forEach(i => {
             cfg[i.dataset.k] = i.tagName==='SELECT' ? i.value : parseFloat(i.value);
           });
