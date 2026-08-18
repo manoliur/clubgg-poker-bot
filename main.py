@@ -94,8 +94,20 @@ class Bot:
         self._retries = 0
         self._last_action = None
         self.actions = 0
+        self.save_frames = isinstance(screen, AdbScreen)
         self.stats = {'fold': 0, 'check': 0, 'call': 0, 'raise': 0}
         self.started = time.time()
+
+    def _save_frame(self, img, tag):
+        """Кадр решения/промаха распознавания — для диагностики на компе."""
+        if not self.save_frames or img is None:
+            return
+        try:
+            os.makedirs(config.SHOTS_LIVE, exist_ok=True)
+            name = f"{time.strftime('%Y%m%d_%H%M%S')}_{tag}.png"
+            cv2.imwrite(os.path.join(config.SHOTS_LIVE, name), img)
+        except OSError:
+            pass
 
     # ---------- вспомогательное ----------
     def log(self, msg):
@@ -202,6 +214,10 @@ class Bot:
                  f"поз={state['position']} игроков={state['players']} "
                  f"ставка={'да' if state['has_bet'] else 'нет'} -> {action.upper()} "
                  f"({reason})")
+        if len(hole) < 2:
+            self._save_frame(img, f'{action}_badcards')
+        elif self.save_frames:
+            self._save_frame(img, action)
         if not self.dry_run and point:
             self.screen.tap(*point)
         self.record(entry)
@@ -233,7 +249,7 @@ class Bot:
 
     # ---------- цикл ----------
     def run(self, interval=0.8, settle=2.5, stable_frames=2, max_actions=None,
-            fail_limit=30, retry_after=25.0):
+            fail_limit=30, retry_after=25.0, card_confirm=3):
         """Игровой цикл, реактивный по состоянию.
 
         После своего хода НЕ ждём исчезновения кнопок (в ClubGG панель остаётся
@@ -304,6 +320,24 @@ class Bot:
                     if self.stable < stable_frames:
                         continue             # без паузы: добираем подтверждающий кадр
                     self.stable = 0
+                    # подтверждение КАРТ: действуем только когда видны обе карманные
+                    # карты (живой тест: [None,2c] и 7d->2d ломали решения). Перечитываем
+                    # кадр до card_confirm раз; если карты так и не прочитались —
+                    # действуем безопасно (step сам выберет чек/фолд).
+                    for _ in range(card_confirm):
+                        if len([c for c in state['hole'] if c]) == 2:
+                            break
+                        img = self.screen.grab()
+                        if img is None:
+                            break
+                        state = ts.read_state(img, tpl_dir=self.tpl_dir)
+                        self.last_state = state
+                        if not (state['my_turn'] and state['in_hand']):
+                            break
+                    if not (state['my_turn'] and state['in_hand']):
+                        if interval:
+                            time.sleep(interval)
+                        continue
                     entry = self.step(img, state)
                     if entry is None:
                         if interval:

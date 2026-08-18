@@ -12,6 +12,7 @@ import os
 BASE = os.environ.get('CLUBGG_BASE') or os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE, 'templates')
 SHOTS_DIR = os.path.join(BASE, 'shots')
+SHOTS_LIVE = os.path.join(os.path.dirname(BASE), 'shots_live')   # кадры живых решений/промахов
 HAND_HISTORY = os.path.join(BASE, 'hand_history.jsonl')
 LOG_FILE = os.path.join(BASE, 'bot.log')
 

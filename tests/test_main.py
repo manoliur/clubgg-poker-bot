@@ -245,6 +245,23 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(bot.actions, 2, 'чек повторяем, пока состояние не сменилось')
         self.assertEqual(len(screen.taps), 2)
 
+    def test_waits_for_both_hole_cards(self):
+        """Не действуем, пока не распознаны ОБЕ карманные карты — перечитываем кадр.
+
+        Живой тест: [None, '2c'] и '7d'->'2d' ломали решения (фолд карманной пары).
+        """
+        partial = synth.render(hole=['Ah', None], buttons=True, call_amount=True, players=2)
+        full = synth.render(hole=['Ah', 'Kd'], buttons=True, call_amount=True, players=2)
+        screen = FakeScreen([partial, full, full, full])
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, max_actions=2, retry_after=1000)
+        self.assertEqual(bot.actions, 1)
+        self.assertEqual(len(screen.taps), 1)
+        self.assertEqual([c for c in bot.last_state['hole'] if c], ['Ah', 'Kd'],
+                         'решение принято по ПОЛНОМУ чтению карт')
+
     def test_run_gives_up_when_no_frames(self):
         """Телефон отключён (grab() -> None): цикл не висит вечно, а выходит."""
         bot, screen = self.make_bot([])
