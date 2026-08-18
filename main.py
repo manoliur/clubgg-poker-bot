@@ -264,8 +264,8 @@ class Bot:
         return False
 
     # ---------- цикл ----------
-    def run(self, interval=0.8, settle=2.5, stable_frames=2, max_actions=None,
-            fail_limit=30, retry_after=25.0, card_confirm=3):
+    def run(self, interval=0.3, settle=2.5, stable_frames=1, max_actions=None,
+            fail_limit=30, retry_after=25.0, card_confirm=2):
         """Игровой цикл, реактивный по состоянию.
 
         После своего хода НЕ ждём исчезновения кнопок (в ClubGG панель остаётся
@@ -360,7 +360,10 @@ class Bot:
                             time.sleep(interval)
                         continue
                     acted_ts = time.time()
-                    acted_sig = sig
+                    # сигнатура по состоянию, на котором РЕАЛЬНО сыграли (после
+                    # перечитывания карт оно могло измениться — иначе сыграем дважды)
+                    acted_sig = (tuple(c for c in state['hole'] if c), state['street'],
+                                 tuple(state['board']), state['has_bet'])
                 except subprocess.TimeoutExpired:
                     self.log('adb не ответил, пауза 3с')
                     time.sleep(3)
@@ -388,7 +391,7 @@ def main(argv=None):
     ap.add_argument('--dry-run', action='store_true', help='не тапать, только логировать')
     ap.add_argument('--once', action='store_true', help='один проход и выход')
     ap.add_argument('--image', help='разобрать кадр из файла вместо телефона')
-    ap.add_argument('--interval', type=float, default=0.8, help='пауза между кадрами, с (только когда не наш ход; на ходу — подряд)')
+    ap.add_argument('--interval', type=float, default=0.3, help='пауза между кадрами, с (простой; на ходу — подряд)')
     ap.add_argument('--settle', type=float, default=2.5, help='пауза после своего хода, с')
     ap.add_argument('--stack', type=float, default=69.6, help='стек в ББ')
     ap.add_argument('--max-actions', type=int, help='сыграть N решений и выйти')
