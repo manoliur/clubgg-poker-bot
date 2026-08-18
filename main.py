@@ -298,6 +298,7 @@ class Bot:
         fails = 0
         acted_sig = None
         acted_ts = 0.0
+        opp_acted = False     # после нашего хода ход уходил к оппоненту и вернулся
         try:
             while max_actions is None or self.actions < max_actions:
                 try:
@@ -314,6 +315,7 @@ class Bot:
                     fails = 0
                     state = ts.read_state(img, tpl_dir=self.tpl_dir)
                     if not (state['my_turn'] and state['in_hand']):
+                        opp_acted = True    # ход не наш: оппонент думает/сыграл
                         self.stable = 0
                         if interval:
                             time.sleep(interval)
@@ -321,10 +323,20 @@ class Bot:
                     now = time.time()
                     sig = self._sig(state)
                     if sig == acted_sig and now - acted_ts < retry_after:
-                        self.stable = 0      # тот же ход, где мы уже сыграли
-                        if interval:
-                            time.sleep(interval)
-                        continue
+                        if opp_acted:
+                            # после нашего хода ход вернулся, а сигнатура «та же»:
+                            # сумма колла не читается (нет эталонов цифр), значит
+                            # это ререйз/переставка оппонента — НОВОЕ решение.
+                            # Без этого бот молчит до таймаута (живой тест: QQ).
+                            self.log('ход вернулся после оппонента (ререйз/переставка) — '
+                                     'решаю заново')
+                            acted_sig = None
+                            opp_acted = False
+                        else:
+                            self.stable = 0      # тот же ход, где мы уже сыграли
+                            if interval:
+                                time.sleep(interval)
+                            continue
                     if sig == acted_sig:     # состояние не меняется — тап мог не пройти
                         # Повторяем ТОЛЬКО чек/фолд: повторный тап по «Бет»/«Колл» =
                         # двойная ставка (рейз/колл того же размера второй раз).
@@ -373,6 +385,7 @@ class Bot:
                             time.sleep(interval)
                         continue
                     acted_ts = time.time()
+                    opp_acted = False    # свежий ход: ждём новый сигнал от оппонента
                     # сигнатура по состоянию, на котором РЕАЛЬНО сыграли (после
                     # перечитывания карт оно могло измениться — иначе сыграем дважды)
                     acted_sig = self._sig(state)
@@ -411,6 +424,11 @@ def main(argv=None):
     ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
     ap.add_argument('--templates', help=f'папка эталонов (по умолчанию {config.TEMPLATES_DIR})')
     ap.add_argument('--chart', help='файл чарта стратегии (charts/6max_standard.json)')
+    ap.add_argument('--aggression', type=float, default=1.0,
+                    help='множитель агрессивности (размеры ставок; 0.5-2.0)')
+    ap.add_argument('--defense', type=float, default=1.0,
+                    help='множитель защиты (готовность коллить; 0.5-2.0)')
+    ap.add_argument('--name', help='имя бота (для логов панели)')
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, 'reconfigure'):    # русский лог в консоли Windows (cp866)
         sys.stdout.reconfigure(errors='replace')
@@ -423,6 +441,16 @@ def main(argv=None):
             print(f'ERR: чарт не загружен: {e}')
             return 2
         print(f'чарт: {chart.name} ({args.chart})')
+    if chart is not None and (args.aggression != 1.0 or args.defense != 1.0):
+        st = chart.settings
+        st['aggression'] = round(st['aggression'] * args.aggression, 3)
+        # защита: готовность коллить — выше пороги цены, ниже нужное эквити
+        st['medium_max_price'] = round(st['medium_max_price'] * args.defense, 3)
+        st['preflop_max_price'] = round(st['preflop_max_price'] * args.defense, 3)
+        st['cheap_price'] = round(st['cheap_price'] * args.defense, 3)
+        st['max_call_stack_frac'] = round(st['max_call_stack_frac'] * args.defense, 3)
+        st['draw_min_equity'] = round(st['draw_min_equity'] / args.defense, 3)
+        print(f'настройки: агрессия x{args.aggression}, защита x{args.defense}')
 
     screen = (FileScreen(args.image) if args.image
               else AdbScreen(adb=args.adb, serial=args.serial))
