@@ -95,6 +95,25 @@ class PreflopTest(unittest.TestCase):
         self.assertEqual(st.decide(state(hole=hand, position='UTG', players=6))['action'],
                          'check')
 
+    def test_seated_players_decide_tactic_not_in_hand(self):
+        """Тактика зависит от числа СИДЯЩИХ, а не от числа в раздаче.
+
+        Живой баг: на столе 4-max один оппонент сфолдил -> players=2, и бот
+        включал HU-диапазон (K5o рейз как в хедз-апе). С 4 сидящими даже при
+        2 в раздаче это 6-max стол: K5o на SB — вне диапазона открытия.
+        """
+        hand = ['K5o'[0] + 'h', '5d']      # K5o
+        # сидят 4 (players_seated), в раздаче 2 (players) — стол 4-max, не HU
+        d = st.decide(state(hole=hand, position='SB', players=2, players_seated=4))
+        self.assertEqual(d['action'], 'check',
+                         '4-max стол: HU-тактика не применяется')
+        # контроль: реальный HU (сидят 2) — K5o рейзится
+        d = st.decide(state(hole=hand, position='SB', players=2, players_seated=2))
+        self.assertEqual(d['action'], 'raise', 'настоящий HU: широкая тактика')
+        # контроль: 6-max стол — K5o на SB чек/фолд
+        d = st.decide(state(hole=hand, position='SB', players=2, players_seated=6))
+        self.assertEqual(d['action'], 'check', '6-max стол: HU-тактика не применяется')
+
     def test_unknown_position_uses_middle_range(self):
         d = st.decide(state(hole=['Ah', 'Qh'], position=None, players=6))
         self.assertEqual(d['action'], 'raise')

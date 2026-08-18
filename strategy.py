@@ -228,7 +228,12 @@ class Chart:
             parse_range(spec)
 
     def range_for(self, position, players, kind='open'):
-        """Диапазон для позиции: хедз-ап отдельный, иначе 6-max таблицы."""
+        """Диапазон для позиции: хедз-ап отдельный, иначе 6-max таблицы.
+
+        players здесь — число СИДЯЩИХ за столом (players_seated), а не число в
+        раздаче: на столе 4-max с одним сфолдившим всё равно 6-max-таблица,
+        а не HU (раньше бот играл HU_SB против 3-4-max столов — живой тест).
+        """
         table = self.open if kind == 'open' else self.call
         if players is not None and players <= 2:
             key = 'husb' if position in (None, 'SB', 'BTN') else 'hubb'
@@ -475,11 +480,13 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
 
     street = state.get('street') or ('preflop' if not board else 'unknown')
     to_call, pot = state.get('to_call_bb'), state.get('pot_bb')
-    players, position = state.get('players'), state.get('position')
+    players = state.get('players')                       # в раздаче (постфлоп)
+    seated = state.get('players_seated') or players      # сидят за столом (префлоп)
+    position = state.get('position')
 
     try:
         if street == 'preflop' or not board:
-            decision = decide_preflop(hole, position, players, has_bet, to_call, pot,
+            decision = decide_preflop(hole, position, seated, has_bet, to_call, pot,
                                       stack_bb, chart)
             made = 'preflop'
         else:

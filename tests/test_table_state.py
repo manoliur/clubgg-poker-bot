@@ -240,12 +240,17 @@ class ReadStateTest(unittest.TestCase):
             self.assertEqual(s['first_to_act'], 'me', players)
 
     def test_sitting_out_player_does_not_shift_position(self):
-        """Игрок вне раздачи не участвует в круге позиций."""
+        """Игрок вне раздачи не сдвигает позиции: круг считается по числу СИДЯЩИХ.
+
+        За столом 5 мест (2 вне раздачи), дилер на месте 1 -> герой на третьем
+        месте от баттона = UTG в 5-max. Раньше позиция считалась по числу в
+        раздаче (3 -> SB) и бот включал HU-тактику на столе с 3-5 игроками.
+        """
         s = self.state(hole=['Ah', 'Kd'], players=3, dealer=1, sitting_out=2)
         self.assertEqual(s['players'], 3)
         self.assertEqual(s['players_seated'], 5)
-        # 3 в раздаче: BTN=опп1(дилер), SB=герой, BB=опп0
-        self.assertEqual(s['position'], 'SB')
+        # 5 сидящих, дилер на месте 1: BTN=опп1, SB=опп2, BB=опп3, UTG=герой
+        self.assertEqual(s['position'], 'UTG')
 
     def test_full_board_read_at_six_max(self):
         """Панели игроков по краям заходят на зону доски — карты всё равно читаются."""

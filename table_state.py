@@ -343,13 +343,10 @@ def dealer_seat(x, y, img, panels=None):
     Плашек не нашлось — падаем на грубое правило «низ экрана = моя кнопка».
     """
     panels = player_panels_ordered(img) if panels is None else panels
-    in_hand = [p for p in panels if p['in_hand']]
-    if not in_hand:
-        return None, ('me' if y > img.shape[0] * config.HERO_D_ZONE[1] else 'opp')
-    nearest = min(in_hand, key=lambda p: (p['x'] - x) ** 2 + (p['y'] - y) ** 2)
+    nearest = min(panels, key=lambda p: (p['x'] - x) ** 2 + (p['y'] - y) ** 2)
     if nearest['is_hero']:
         return None, 'me'
-    opponents = [p for p in in_hand if not p['is_hero']]
+    opponents = [p for p in panels if not p['is_hero']]
     return opponents.index(nearest), 'opp'
 
 
@@ -475,6 +472,9 @@ def read_state(img, tpl_dir=None):
     hole = cards['hole']
     panels = player_panels_ordered(img)
     n_players, occupied, _ = count_players(img, panels=panels)
+    seated = len(panels)                     # сидят за столом (включая вне раздачи)
+    opponents_all = [p for p in panels if not p['is_hero']]
+    occupied_all = list(range(len(opponents_all)))   # места всех оппонентов по кругу
     dealer = find_dealer(img, panels=panels)
     where = dealer['where'] if dealer else None
     buttons = detect_action_buttons(img)
@@ -484,7 +484,11 @@ def read_state(img, tpl_dir=None):
     d_seat = dealer['seat'] if dealer else None
     # без плашки героя круг мест не привязан к нему — позицию считать нельзя
     hero_seated = any(p['is_hero'] for p in panels)
-    pos = hero_position(where, n_players, d_seat, occupied) if hero_seated else None
+    # позиция и очерёдность считаются по числу СИДЯЩИХ за столом (seated), а не
+    # по числу в раздаче: если один сфолдил, стол всё равно 4-max, а не HU.
+    # Иначе бот на столе с 3-4 игроками переключался на хедз-ап тактику
+    # (живой тест: «в раздаче=2, сидят=3» -> играл HU_SB против 3-max стола).
+    pos = hero_position(where, seated, d_seat, occupied_all) if hero_seated else None
 
     digits = load_digit_templates(tpl_dir)
     pot_bb = read_number(img, config.POT_ZONE, 'yellow', digits) if digits else None
@@ -504,15 +508,15 @@ def read_state(img, tpl_dir=None):
         'board': board,
         'street': street,
         'players': n_players,
-        'players_seated': len(panels),
-        'occupied_seats': occupied,
+        'players_seated': seated,
+        'occupied_seats': occupied_all,
         'seats': [{'x': p['x'], 'y': p['y'], 'hero': p['is_hero'], 'in_hand': p['in_hand']}
                   for p in panels],
         'dealer': where,
         'dealer_seat': d_seat,
         'position': pos,
         'hero_is_dealer': where == 'me',
-        'first_to_act': (first_to_act(street, n_players, where == 'me', d_seat, occupied)
+        'first_to_act': (first_to_act(street, seated, where == 'me', d_seat, occupied_all)
                          if where and hero_seated else None),
         'pot_bb': pot_bb,
         'to_call_bb': to_call_bb,
