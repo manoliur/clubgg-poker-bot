@@ -21,9 +21,12 @@ import unittest
 import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config                           # noqa: E402
 import table_state as ts                # noqa: E402
+from build_templates import digit_labels  # noqa: E402
 
-SHOTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'shots_audit')
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOTS = os.path.join(BASE, 'shots_audit')
 
 # кадр -> (вскрытие, живой ли НИЖНИЙ пресет, сколько живых пресетов всего)
 FRAMES = {
@@ -58,6 +61,58 @@ class LiveFramesTest(unittest.TestCase):
                 self.assertEqual(len(live), n_live)
                 if bottom_live is not None:
                     self.assertEqual(presets[0]['enabled'], bottom_live)
+
+    def test_numbers_are_read(self):
+        """Банк читается на каждом живом кадре — ради этого и собирались эталоны."""
+        for name, pot in POTS.items():
+            with self.subTest(name):
+                s = ts.read_state(self.frame(name))
+                self.assertEqual(s['pot_bb'], pot)
+
+
+# кадр -> банк (прочитано глазами с оригиналов 1080px)
+POTS = {
+    '20260818_154349_raise.png': 4.0,
+    '20260818_154732_raise.png': 1.5,
+    '20260818_154820_raise.png': 4.0,
+    '20260818_154841_raise.png': 2.0,
+    '20260818_154915_check.png': 2.0,
+    '20260818_154925_raise.png': 2.0,
+}
+
+
+class DigitLabelsTest(unittest.TestCase):
+    """Каждое размеченное число (банк, пресеты, колл) читается обратно эталонами.
+
+    Разметка живёт в build_templates.DIGIT_FRAMES; здесь она работает как
+    регрессия распознавания: 392 числа с 86 живых кадров.
+    """
+
+    def setUp(self):
+        self.labels = digit_labels()
+        if not self.labels:
+            self.skipTest('нет живых кадров (shots_digits/, shots_audit/)')
+        self.digits = ts.load_digit_templates()
+
+    def test_all_labelled_numbers_read_back(self):
+        bad, total = [], 0
+        cache = {}
+        for item in self.labels:
+            img = cache.get(item['file'])
+            if img is None:
+                img = cache[item['file']] = cv2.imread(os.path.join(BASE, item['file']))
+            self.assertIsNotNone(img, item['file'])
+            # погашенная строка на СЖАТОМ кадре: точка «0.6» тонет в jpeg-шуме,
+            # и число читается как 6. На кадрах 1080px (как у бота) она видна.
+            if item['dim'] and img.shape[1] < config.REF_W:
+                continue
+            total += 1
+            want = float(item['text'].replace('ББ', ''))
+            got = ts.read_number(img, item['rect'], item['ink'], self.digits)
+            if got != want:
+                bad.append(f'{item["file"]} {want} -> {got}')
+        self.assertGreater(total, 300, 'разметка не должна усыхать')
+        self.assertEqual(bad, [], f'не прочитано {len(bad)} из {total}')
 
 
 if __name__ == '__main__':

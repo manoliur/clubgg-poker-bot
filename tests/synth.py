@@ -13,6 +13,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
+import table_state as ts  # noqa: E402
 
 FELT = (60, 105, 45)          # BGR тёмно-зелёное сукно
 WHITE = (250, 250, 250)
@@ -29,7 +30,7 @@ YELLOW_DIM = (110, 150, 155)  # погашенная сумма: тусклая,
 
 BOARD_CARD = (123, 175)       # w, h
 HOLE_CARD = (112, 165)
-BOARD_Y = 1080
+BOARD_Y = 1120                # карты доски начинаются ПОД плашкой банка (config.POT_ZONE)
 BOARD_X0 = 250
 BOARD_GAP = 10
 HOLE_Y = 1730
@@ -102,6 +103,47 @@ def draw_card(img, x, y, w, h, card, index_rect=None, center_picture=True):
         draw_suit(img, x + w // 2, y + int(h * 0.68), int(h * 0.15), suit, color)
 
 
+def draw_amount(img, center, text, height, color=YELLOW):
+    """Сумма («2.5 BB») шрифтом клиента: глифы берутся из templates/digit_*.png.
+
+    cv2.putText для сумм не годится: его цифры не совпадают со шрифтом ClubGG,
+    и синтетический кадр читался бы иначе, чем живой («2.5» вместо 2.5 давало
+    2.0). Точку рисуем кружком у базовой линии: в эталоне она нормализована на
+    всю клетку, и вставленная как есть выглядела бы кругом с цифру ростом.
+    """
+    digits = ts.load_digit_templates()
+    cx, cy = center
+    gap = max(2, height // 8)
+    items = []
+    for ch in text:
+        if ch == ' ':
+            items.append((None, gap * 2))
+            continue
+        key = {'.': 'dot', ',': 'dot', 'B': 'bb', 'Б': 'bb'}.get(ch, ch)
+        tpl = digits.get(key)
+        if tpl is None:
+            return False
+        if key == 'dot':
+            items.append(('dot', max(3, height // 5)))
+            continue
+        w = max(1, int(round(height * tpl.shape[1] / tpl.shape[0])))
+        items.append((cv2.resize(tpl, (w, height), interpolation=cv2.INTER_NEAREST), w))
+    total = sum(w for _, w in items) + gap * (len(items) - 1)
+    x = cx - total // 2
+    top, bottom = cy - height // 2, cy + height // 2
+    for glyph, w in items:
+        if glyph is None:
+            pass
+        elif isinstance(glyph, str):             # точка
+            cv2.circle(img, (x + w // 2, bottom - w // 2), w // 2, color, -1)
+        else:
+            box = img[top:top + height, x:x + w]
+            if box.shape[:2] == glyph.shape[:2]:
+                box[glyph > 127] = color
+        x += w + gap
+    return True
+
+
 def draw_button(img, center, w, h, amount=None, disabled=False):
     """Кнопка полосы действий. amount — жёлтая сумма на ней («Колл 2.5», «Бет 1.3»).
 
@@ -114,7 +156,9 @@ def draw_button(img, center, w, h, amount=None, disabled=False):
     _rounded_rect(img, cx - w // 2, cy - h // 2, cx + w // 2, cy + h // 2, fill, r=16)
     if amount is not None:
         color = YELLOW_DIM if disabled else YELLOW
-        cv2.putText(img, amount, (cx - 40, cy + 15), cv2.FONT_HERSHEY_SIMPLEX, 1.3, color, 3)
+        if not draw_amount(img, (cx, cy + 10), f'{amount} BB', max(12, h // 3), color):
+            cv2.putText(img, amount, (cx - 40, cy + 15), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.3, color, 3)
 
 
 def draw_seat(img, zone, stack='259', cards=True, name='Player'):
@@ -172,10 +216,15 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
     cv2.ellipse(img, (W // 2, int(H * 0.45)), (int(W * 0.46), int(H * 0.20)),
                 0, 0, 360, (70, 120, 55), -1)
 
-    # банк
+    # банк — жёлтым в плашке над доской (config.POT_ZONE); подпись «Общий банк»
+    # клиент пишет серым выше, в жёлтую маску она не попадает
     if pot_bb is not None:
-        cv2.putText(img, f'Obshiy bank {pot_bb} BB', (int(W * 0.28), int(H * 0.355)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, YELLOW, 3)
+        cv2.putText(img, 'Obshiy bank', (int(W * 0.40), int(H * 0.428)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+        if not draw_amount(img, (int(W * 0.50), int(H * 0.447)), f'{pot_bb} BB',
+                           int(H * 0.014)):
+            cv2.putText(img, f'{pot_bb} BB', (int(W * 0.44), int(H * 0.455)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, YELLOW, 2)
 
     # мои карты веером (перекрываются -> контур слипается)
     hole = hole or []

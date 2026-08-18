@@ -14,9 +14,10 @@
 Фиксированные прямоугольники мест для этого не годятся: клиент сажает игроков
 по-разному, а пустые места не рисует вовсе.
 
-Числа читаются только при наличии templates/digit_*.png (см. build_templates.py).
-Без них бот работает по факту наличия жёлтой суммы на кнопке колла: есть жёлтое —
-перед нами ставка, нет — можно чекать.
+Числа читаются только при наличии templates/digit_*.png (см. build_templates.py):
+эталоны цифр собраны с ЖИВЫХ кадров, синтетические глифы к шрифту ClubGG не
+подходят. Без эталонов бот работает по факту наличия жёлтой суммы на кнопке
+колла: есть жёлтое — перед нами ставка, нет — можно чекать.
 """
 import math
 import os
@@ -31,6 +32,8 @@ STREETS = {0: 'preflop', 3: 'flop', 4: 'turn', 5: 'river'}
 POSITIONS_6MAX = ['BTN', 'SB', 'BB', 'UTG', 'MP', 'CO']
 
 CANON_DIGIT = (20, 28)
+DIGIT_MIN_AREA = 12         # площадь символа на эталонном экране 1080x2400
+DIGIT_MIN_SCORE = 0.45      # порог уверенности для эталона цифры
 
 
 # --------------------------------------------------------------------------
@@ -65,7 +68,26 @@ def bright_mask(bgr):
     return (gray > 170).astype(np.uint8) * 255
 
 
-INK_MASKS = {'yellow': yellow_mask, 'bright': bright_mask, 'gold': gold_mask}
+def amber_mask(bgr):
+    """Жёлто-оранжевый ТЕКСТ сумм — маска для чтения цифр.
+
+    yellow_mask для этого не годится: тело цифры в клиенте — сплошной
+    (b,g,r)=(90,214,255), а условие b<90 отсекает как раз его и оставляет
+    только антиалиасные края, поэтому цифра рассыпается на 5-10 огрызков.
+    Здесь берём тон/насыщенность (HSV), нижняя граница V опущена до 110 —
+    так же читаются ПОГАШЕННЫЕ пресеты (там текст тусклый, V~130).
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv, (15, 60, 110), (45, 255, 255))
+
+
+def stack_ink_mask(bgr):
+    """Голубые цифры стека («240.3 ББ») — тот же шрифт, что у жёлтых сумм."""
+    return stack_mask(bgr)
+
+
+INK_MASKS = {'yellow': yellow_mask, 'bright': bright_mask, 'gold': gold_mask,
+             'amber': amber_mask, 'stack': stack_ink_mask}
 
 
 def _crop(img, rect):
@@ -425,23 +447,52 @@ def dealer_seat(x, y, img, panels=None):
 # --------------------------------------------------------------------------
 # чтение чисел (банк, сумма колла) — при наличии эталонов цифр
 # --------------------------------------------------------------------------
-def segment_text_glyphs(img, rect, ink='yellow'):
-    """Глифы текста в прямоугольнике: [(x, нормализованный глиф)] слева направо."""
+def segment_text_glyphs(img, rect, ink='amber'):
+    """Глифы текста в прямоугольнике: [(x, нормализованный глиф)] слева направо.
+
+    Куски одного символа склеиваются по колонкам: на сжатых кадрах (jpeg с
+    телефона) маска рвёт цифру на 2-3 части, а по x они стоят друг над другом.
+    Порог площади масштабируется по размеру кадра — иначе точка в «1.5» на
+    кадре 540px (9 px) не проходит порог, снятый с эталонных 1080px, и число
+    читается как «15».
+    """
     crop, _ = _crop(img, rect)
     if crop.size == 0:
         return []
     mask = INK_MASKS[ink](crop)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    comps = [stats[i] for i in range(1, n) if stats[i][4] >= 12]
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    H, W = img.shape[:2]
+    min_area = max(3, int(DIGIT_MIN_AREA * W * H / (config.REF_W * config.REF_H)))
+    comps = [stats[i] for i in range(1, n) if stats[i][4] >= min_area]
     if not comps:
         return []
-    max_h = max(c[3] for c in comps)
+    boxes = _merge_columns(comps)
+    max_h = max(b[3] for b in boxes)
+    max_area = max(b[2] * b[3] for b in boxes)
     out = []
-    for x, y, w, h, area in sorted(comps, key=lambda c: c[0]):
+    for x, y, w, h in boxes:
         if h < 0.25 * max_h and w > 0.9 * max_h:
             continue                             # длинная черта/подчёркивание
+        if w * h < 0.04 * max_area:              # крапина от сжатия, не символ
+            continue
         out.append((int(x), card_reader._norm_glyph(mask, (x, y, w, h), CANON_DIGIT)))
     return out
+
+
+def _merge_columns(comps):
+    """Компоненты -> боксы символов: пересекающиеся по x считаем одним символом."""
+    boxes = []
+    for x, y, w, h, _ in sorted(comps, key=lambda c: c[0]):
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        if boxes:
+            bx, by, bw, bh = boxes[-1]
+            overlap = min(bx + bw, x + w) - max(bx, x)
+            if overlap > 0.4 * min(bw, w):
+                nx, ny = min(bx, x), min(by, y)
+                boxes[-1] = (nx, ny, max(bx + bw, x + w) - nx, max(by + bh, y + h) - ny)
+                continue
+        boxes.append((x, y, w, h))
+    return boxes
 
 
 def load_digit_templates(tpl_dir=None):
@@ -457,10 +508,16 @@ def load_digit_templates(tpl_dir=None):
     return digits
 
 
-def read_number(img, rect, ink='yellow', digits=None, tpl_dir=None):
-    """Прочитать число в зоне. Без эталонов цифр возвращает None."""
+def read_number(img, rect, ink='amber', digits=None, tpl_dir=None):
+    """Прочитать число в зоне. Без эталонов цифр возвращает None.
+
+    Числу в клиенте всегда сопутствует подпись «ББ» тем же шрифтом и цветом,
+    поэтому 'bb' — такой же эталон, как цифры: без него буква Б натягивается
+    на ближайшую цифру («4 ББ» -> 466). Читаем цифры до первой «ББ» и всё,
+    что дальше, отбрасываем.
+    """
     digits = load_digit_templates(tpl_dir) if digits is None else digits
-    if not digits:
+    if not any(k.isdigit() for k in digits):
         return None
     glyphs = segment_text_glyphs(img, rect, ink)
     if not glyphs:
@@ -468,8 +525,10 @@ def read_number(img, rect, ink='yellow', digits=None, tpl_dir=None):
     text = ''
     for _, g in glyphs:
         name, score = card_reader.match_best(g, digits)
-        if name is None or score < 0.45:
-            continue
+        if name is None or score < DIGIT_MIN_SCORE:
+            return None                          # неуверенный глиф -> число не читаем
+        if name == 'bb':
+            break
         text += '.' if name == 'dot' else name
     try:
         return float(text)
@@ -480,11 +539,12 @@ def read_number(img, rect, ink='yellow', digits=None, tpl_dir=None):
 def call_amount_fp(img):
     """Отпечаток зоны жёлтой суммы на кнопке «Колл».
 
-    Цифры суммы не читаются (нет эталонов), но САМА сумма меняется при
-    ререйзе/переставке — меняется и раскладка жёлтых пикселей. Отпечаток
-    (сетка 8x4, квантованная) включается в сигнатуру состояния: без него
-    ререйз невидим (has_bet остаётся True, to_call_bb=None), и бот молчит
-    до следующей карты (живой тест: CALL -> оппонент переставил -> тишина).
+    Страховка на случай, когда сумма не прочиталась (эталоны цифр есть, но
+    глиф смазан анимацией): САМА сумма при ререйзе/переставке меняется, значит
+    меняется и раскладка жёлтых пикселей. Отпечаток (сетка 8x4, квантованная)
+    включается в сигнатуру состояния: без него ререйз невидим (has_bet
+    остаётся True, to_call_bb=None), и бот молчит до следующей карты (живой
+    тест: CALL -> оппонент переставил -> тишина).
     """
     H, W = img.shape[:2]
     x1 = int(config.CALL_AMOUNT_X[0] / config.REF_W * W)
@@ -590,12 +650,10 @@ def read_state(img, tpl_dir=None):
     pos = hero_position(where, seated, d_seat, occupied_all) if hero_seated else None
 
     digits = load_digit_templates(tpl_dir)
-    pot_bb = read_number(img, config.POT_ZONE, 'yellow', digits) if digits else None
+    pot_bb = read_number(img, config.POT_ZONE, 'amber', digits) if digits else None
     to_call_bb = None
-    if digits and bet:
-        rect = (config.CALL_AMOUNT_X[0] / config.REF_W, config.ACTION_BAR_Y[0],
-                config.CALL_AMOUNT_X[1] / config.REF_W, config.ACTION_BAR_Y[1])
-        to_call_bb = read_number(img, rect, 'yellow', digits)
+    if digits and bet and not showdown:
+        to_call_bb = read_number(img, config.call_amount_rect(), 'amber', digits)
 
     return {
         'my_turn': my_turn,

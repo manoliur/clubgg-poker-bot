@@ -322,19 +322,63 @@ class ReadStateTest(unittest.TestCase):
 
 
 class NumberReadingTest(unittest.TestCase):
-    """Чтение чисел работает после сбора эталонов цифр (жёлтый текст)."""
+    """Чтение чисел: эталоны цифр собраны с живых кадров (см. build_templates)."""
+
+    def test_templates_cover_all_digits(self):
+        digits = ts.load_digit_templates()
+        for ch in '0123456789':
+            self.assertIn(ch, digits, f'нет эталона цифры {ch}')
+        self.assertIn('dot', digits, 'нет эталона точки — 1.5 читалось бы как 15')
+        self.assertIn('bb', digits, 'нет эталона «Б» — подпись ББ липнет к числу')
 
     def test_read_call_amount(self):
+        img = synth.render(hole=['Ah', 'Kd'], call_amount=True)
+        self.assertEqual(ts.read_number(img, config.call_amount_rect()), 2.5)
+
+    def test_read_pot(self):
+        for pot in (2.0, 4.5, 12.5, 0.5):
+            img = synth.render(hole=['Ah', 'Kd'], pot_bb=pot)
+            self.assertEqual(ts.read_number(img, config.POT_ZONE), pot)
+
+    def test_state_carries_numbers(self):
+        s = ts.read_state(synth.render(hole=['Ah', 'Kd'], pot_bb=6.5, call_amount=True))
+        self.assertEqual(s['pot_bb'], 6.5)
+        self.assertEqual(s['to_call_bb'], 2.5)
+
+    def test_no_bet_no_call_amount(self):
+        s = ts.read_state(synth.render(hole=['Ah', 'Kd'], pot_bb=3.0, call_amount=False))
+        self.assertFalse(s['has_bet'])
+        self.assertIsNone(s['to_call_bb'])
+
+    def test_read_on_downscaled_frame(self):
+        """Кадр вдвое меньше эталонного: точка мельче порога площади, но читается.
+
+        Так сняты кадры shots_digits/ (540px), на них же собраны эталоны.
+        """
+        img = synth.render(hole=['Ah', 'Kd'], pot_bb=1.5, call_amount=True,
+                           size=(config.REF_W // 2, config.REF_H // 2))
+        self.assertEqual(ts.read_number(img, config.POT_ZONE), 1.5)
+
+    def test_bb_suffix_not_read_as_digits(self):
+        """«4 ББ» — это 4, а не 466: у буквы Б свой эталон, дальше него не читаем."""
+        img = synth.render(hole=['Ah', 'Kd'], pot_bb=4.0)
+        self.assertEqual(ts.read_number(img, config.POT_ZONE), 4.0)
+
+    def test_collect_digits_from_marked_rect(self):
+        """Разметка {'rect','text'} собирает эталоны цифр из кадра."""
         tmp = tempfile.mkdtemp(prefix='clubgg_dig_')
         try:
             tpl = os.path.join(tmp, 'templates')
             path = os.path.join(tmp, 'frame.png')
-            synth.save(path, call_amount=True)
-            rect = [380 / 1080, 0.86, 700 / 1080, 0.99]
-            collect([{'file': path, 'rect': rect, 'text': '2.5', 'ink': 'yellow'}],
-                    base=tmp, tpl_dir=tpl, verbose=False)
+            synth.save(path, hole=['Ah', 'Kd'], call_amount=True)
+            rect = list(config.call_amount_rect())
+            _, _, skipped = collect([{'file': path, 'rect': rect, 'text': '2.5ББ',
+                                      'ink': 'amber'}], base=tmp, tpl_dir=tpl,
+                                    verbose=False)
+            self.assertEqual(skipped, [])
+            self.assertEqual(sorted(ts.load_digit_templates(tpl)), ['2', '5', 'bb', 'dot'])
             img = cv2.imread(path)
-            self.assertEqual(ts.read_number(img, rect, 'yellow', tpl_dir=tpl), 2.5)
+            self.assertEqual(ts.read_number(img, rect, 'amber', tpl_dir=tpl), 2.5)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -342,7 +386,7 @@ class NumberReadingTest(unittest.TestCase):
         img = synth.render(call_amount=True)
         empty = tempfile.mkdtemp(prefix='clubgg_empty_')
         try:
-            self.assertIsNone(ts.read_number(img, (0.3, 0.86, 0.7, 0.99), tpl_dir=empty))
+            self.assertIsNone(ts.read_number(img, config.call_amount_rect(), tpl_dir=empty))
         finally:
             shutil.rmtree(empty, ignore_errors=True)
 
