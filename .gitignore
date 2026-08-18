@@ -6,3 +6,4 @@ shots/
 hand_history.jsonl
 claude_log.jsonl
 debug/
+shots_audit/

@@ -172,20 +172,47 @@ class Bot:
                   if isinstance(v, dict) and k != config.HERO_NAME]
         return others[0] if len(others) == 1 else None
 
-    @staticmethod
-    def _on_button(state, point):
-        """Точка попадает в реально найденную кнопку? (эталонная координата — нет)"""
-        return bool(point) and any(b['x0'] <= point[0] <= b['x1'] for b in state['buttons'])
+    def bet_point(self, state, pot_frac=None):
+        """Куда тапать ставку/рейз: центр ЖИВОГО пресета правого столбца. None — некуда.
 
-    def resolve_tap(self, state, action):
-        """Действие -> (действие, точка). Рейз без видимой кнопки бета заменяем
-        на колл/чек: тапать в пустоту хуже, чем сыграть пассивно."""
-        point = state['taps'].get('call' if action in ('call', 'check') else action)
-        if action == 'raise' and not self._on_button(state, point):
+        Размер ставки в ClubGG задаётся выбором пресета (33/50/75/100% банка либо
+        «Рейз до X ББ»), а не отдельным подтверждением: тап по пресету и есть
+        ставка. Пресет, который меньше минимальной ставки, клиент гасит — тап по
+        нему не делает ничего, и ход сгорает по таймауту. Раньше бот всегда бил в
+        эталонную точку (881,2319) — нижний, самый мелкий пресет — и молчал 34
+        секунды, когда тот был погашен (живые кадры 15:48:41, 15:49:25).
+
+        pot_frac — доля банка, которую хочет стратегия; берём ближайший к ней
+        живой пресет. Без неё (префлоп, чужая раскладка пресетов) — самый мелкий
+        живой, как и раньше.
+        """
+        presets = state.get('raise_presets') or []
+        live = [p for p in presets if p['enabled']]
+        if not live:
+            return None
+        best = live[0]                       # самый мелкий живой — как было раньше
+        if pot_frac and not state['has_bet']:
+            # доли банка подписаны только у пресетов ставки; против ставки они
+            # подписаны абсолютным «Рейз до X ББ» — сравнивать не с чем
+            fr = config.PRESET_POT_FRAC
+            best = min(live, key=lambda p: abs(fr[min(p['i'], len(fr) - 1)] - pot_frac))
+        if not presets[0]['enabled']:
+            self.log(f'нижний пресет ставки погашен (мельче минимума) — '
+                     f'жму пресет #{best["i"]} в ({best["x"]},{best["y"]})')
+        return best['x'], best['y']
+
+    def resolve_tap(self, state, action, pot_frac=None):
+        """Действие -> (действие, точка). Рейз без живой кнопки бета заменяем
+        на колл/чек: тапать в пустоту или в погашенную кнопку хуже, чем сыграть
+        пассивно (такой тап не проходит и ход сгорает по таймауту)."""
+        if action == 'raise':
+            point = self.bet_point(state, pot_frac)
+            if point is not None:
+                return action, point
             action = 'call' if state['has_bet'] else 'check'
-            point = state['taps'].get('call')
-            self.log('кнопки бета нет на экране -> ' + action)
-        return action, point
+            self.log('живой кнопки ставки нет (погашена или её не видно) -> ' + action)
+            return action, state['taps'].get('call')
+        return action, state['taps'].get('call' if action in ('call', 'check') else action)
 
     # ---------- один шаг ----------
     def step(self, img=None, state=None):
@@ -218,7 +245,8 @@ class Bot:
 
         decision = strategy.decide(state, profile=self.opponent_profile(),
                                    stack_bb=self.stack_bb, chart=self.chart)
-        action, point = self.resolve_tap(state, decision['action'])
+        action, point = self.resolve_tap(state, decision['action'],
+                                         decision.get('pot_frac'))
         reason = decision['reason']
         amount = decision['amount_bb']
         if action != decision['action']:

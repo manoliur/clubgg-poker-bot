@@ -156,6 +156,61 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(len(screen.taps), 1)
         self.assertLess(screen.taps[0][0], rx - int(W * 0.16))
 
+    def test_raise_skips_dimmed_preset(self):
+        """Нижний пресет погашен -> тапаем следующий живой, а не мёртвую кнопку.
+
+        Живой баг: банк 2ББ, «33% Бет 0.6ББ» меньше минимальной ставки и погашен;
+        бот бил в эталонную точку (881,2319) — ровно в него — и терял ход по
+        таймауту (кадры 15:48:41 и 15:49:25, между ними 34 секунды тишины).
+        """
+        frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                             call_amount=True, dealer='me', players=2,
+                             presets=3, dim_presets=(0,))
+        bot, screen = self.make_bot([frame])
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'raise')
+        self.assertEqual(len(screen.taps), 1)
+        dead = ts.raise_presets(frame)[0]
+        self.assertGreater(dead['y'], screen.taps[0][1],
+                           'тап выше погашенной кнопки — по живому пресету')
+
+    def test_raise_becomes_call_when_all_presets_dimmed(self):
+        """Живой кнопки ставки нет вовсе -> играем пассивно, а не в пустоту."""
+        frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                             call_amount=True, dealer='me', players=2,
+                             presets=3, dim_presets=(0, 1, 2, 3))
+        bot, screen = self.make_bot([frame])
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'call')
+        self.assertEqual(len(screen.taps), 1)
+        self.assertLess(screen.taps[0][0], config.PRESET_X[0], 'тап по коллу, не по столбцу')
+
+    def test_bet_size_picks_nearest_preset(self):
+        """Пресет выбирается по доле банка из стратегии, а не «всегда нижний»."""
+        frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                             presets=3, players=2)
+        state = ts.read_state(frame, tpl_dir=self.tpl)
+        bot, _ = self.make_bot([])
+        rows = {p['i']: (p['x'], p['y']) for p in state['raise_presets']}
+        for frac, row in ((0.30, 0), (0.55, 1), (0.80, 2), (1.10, 3)):
+            self.assertEqual(bot.bet_point(state, frac), rows[row], f'доля банка {frac}')
+        self.assertEqual(bot.bet_point(state, None), rows[0],
+                         'без доли — самый мелкий пресет')
+
+    def test_no_tap_on_showdown(self):
+        """Вскрытие: плашки «Показать» — не кнопки действий, тапать их нельзя.
+
+        Живые кадры 15:47:32 и 15:48:20: бот принял вскрытие за свой ход, решил
+        RAISE и тапнул «Показать», открыв столу свои карты.
+        """
+        frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], showdown=True,
+                             players=2)
+        bot, screen = self.make_bot([frame])
+        self.assertIsNone(bot.step())
+        self.assertEqual(screen.taps, [])
+        self.assertTrue(bot.last_state['showdown'])
+        self.assertFalse(bot.last_state['my_turn'])
+
     def test_no_tap_when_not_in_hand(self):
         """Кнопки внизу есть, но карманных карт нет — мы не в раздаче, тапать нельзя."""
         frame = synth.render(hole=[], board=['Ad', 'Ks', '9c'], buttons=True,

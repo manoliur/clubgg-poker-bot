@@ -125,9 +125,77 @@ def detect_action_buttons(img):
     return buttons
 
 
+def is_showdown(img):
+    """Вскрытие: внизу вместо кнопок действий стоит ряд «Показать» с лицами карт.
+
+    Эти плашки такие же серые и лежат ровно там же, где «Колл» и «Бет», поэтому
+    detect_action_buttons принимает их за кнопки действий: бот «ходит» на
+    вскрытии и тапает «Показать», открывая свои карты столу (живые кадры
+    15:47:32 и 15:48:20 — оба помечены как решение RAISE).
+
+    Отличие надёжное: внутри плашки нарисовано белое лицо карты — сплошное белое
+    пятно ~125x85 (8000+ px). У настоящих кнопок белым написан только текст, там
+    нет ни одной связной области крупнее ~800 px.
+    """
+    H, W = img.shape[:2]
+    y0, y1 = int(H * config.ACTION_BAR_Y[0]), int(H * config.ACTION_BAR_Y[1])
+    strip = img[y0:y1, :]
+    if strip.size == 0:
+        return False
+    gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+    sat = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)[:, :, 1]
+    mask = (((gray > 200) & (sat < 40)) * 255).astype(np.uint8)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    min_area = SHOWDOWN_CARD_AREA * W * H / (config.REF_W * config.REF_H)
+    return any(stats[i][4] >= min_area for i in range(1, n))
+
+
+def raise_presets(img):
+    """Кнопки ставки/рейза правого столбца СНИЗУ ВВЕРХ (по возрастанию размера).
+
+    [{'x','y','x0','x1','y0','y1','enabled','fill','yellow'}]. Нижний элемент —
+    сама кнопка «Бет»/«Рейз до» в полосе действий, выше — пресеты (видны, пока
+    столбец раскрыт шевроном). Невидимые строки (столбец свёрнут, вскрытие,
+    не наш ход) в список не попадают.
+
+    ГЛАВНОЕ — enabled. Недоступный пресет клиент не убирает, а ГАСИТ: заливка
+    светлеет (серый ~62 против ~37), сумма перестаёт быть ярко-жёлтой. Тап по
+    погашенной кнопке не делает НИЧЕГО. Именно так бот терял ход по таймауту:
+    при банке 2ББ пресет «33% Бет 0.6ББ» меньше минимальной ставки в 1ББ и
+    погашен, а эталонная точка рейза (881,2319) бьёт ровно в него
+    (живые кадры 15:48:41 и 15:49:25 — 34 секунды тишины и таймаут).
+    """
+    H, W = img.shape[:2]
+    x0 = int(config.PRESET_X[0] * W / config.REF_W)
+    x1 = int(config.PRESET_X[1] * W / config.REF_W)
+    out = []
+    for i, (ry0, ry1) in enumerate(config.PRESET_ROWS):
+        y0 = int(ry0 * H / config.REF_H)
+        y1 = int(ry1 * H / config.REF_H)
+        cell = img[y0:y1, x0:x1]
+        if cell.size == 0:
+            continue
+        fill_mask = gray_button_mask(cell) > 0
+        fill = float(fill_mask.mean())
+        if fill < PRESET_MIN_FILL:              # сукно/рейка, а не кнопка
+            continue
+        gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+        dim = float(gray[fill_mask].mean())
+        yellow = int((yellow_mask(cell) > 0).sum())
+        out.append({'i': i, 'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
+                    'x': (x0 + x1) // 2, 'y': (y0 + y1) // 2,
+                    'fill': round(fill, 3), 'yellow': yellow,
+                    'enabled': dim < PRESET_DIM_MEAN and yellow >= PRESET_MIN_YELLOW})
+    return out
+
+
 def is_my_turn(img):
-    """Мой ход = в правой части нижней полосы есть хотя бы одна кнопка действия."""
-    return len(detect_action_buttons(img)) >= 1
+    """Мой ход = в правой части нижней полосы есть хотя бы одна кнопка действия.
+
+    На вскрытии кнопки «Показать» неотличимы по форме от кнопок действий, но
+    ходить там нельзя — этот случай отсекаем отдельно (см. is_showdown).
+    """
+    return len(detect_action_buttons(img)) >= 1 and not is_showdown(img)
 
 
 def hero_has_cards(img):
@@ -185,6 +253,10 @@ GLYPH_MIN_AREA = 60
 PANEL_MIN_GLYPHS = 3        # минимум «0 ББ»
 CARD_BACK_MIN = 0.12        # доля серого (рубашки карт) в окне над плашкой
 MAX_BTN_W = 0.34            # кнопка действия не шире 34% экрана (фон панели шире)
+PRESET_MIN_FILL = 0.5       # строка столбца занята кнопкой, а не сукном/рейкой
+PRESET_DIM_MEAN = 50        # погашенная кнопка залита СВЕТЛЫМ серым (~62 против ~37)
+PRESET_MIN_YELLOW = 40      # у живой кнопки сумма написана ярко-жёлтым
+SHOWDOWN_CARD_AREA = 3000   # белое лицо карты на плашке «Показать» (эталонные px)
 
 
 def _stack_glyphs(img):
@@ -500,7 +572,11 @@ def read_state(img, tpl_dir=None):
     occupied_all = list(range(len(opponents_all)))   # места всех оппонентов по кругу
     dealer = find_dealer(img, panels=panels)
     where = dealer['where'] if dealer else None
-    buttons = detect_action_buttons(img)
+    # на вскрытии плашки «Показать» стоят на местах кнопок и читаются как кнопки —
+    # ходом это не считаем и кнопок не отдаём, иначе бот тапнет «Показать»
+    showdown = is_showdown(img)
+    buttons = [] if showdown else detect_action_buttons(img)
+    presets = [] if showdown else raise_presets(img)
     my_turn = len(buttons) >= 1
     bet = has_bet(img)
     street = STREETS.get(len(board), 'unknown')
@@ -526,6 +602,8 @@ def read_state(img, tpl_dir=None):
         'in_hand': len(cards['detail']['hole']) >= 1,
         'buttons': buttons,
         'n_buttons': len(buttons),
+        'raise_presets': presets,
+        'showdown': showdown,
         'has_bet': bet,
         'call_fp': call_amount_fp(img),
         'hole': hole,
@@ -565,7 +643,8 @@ if __name__ == '__main__':
                   f'{"в раздаче" if p["in_hand"] else "вне раздачи"}')
         sys.exit(0)
     state = read_state(image)
-    for k in ('my_turn', 'in_hand', 'n_buttons', 'has_bet', 'hole', 'board', 'street', 'players',
+    for k in ('my_turn', 'in_hand', 'n_buttons', 'showdown', 'has_bet', 'hole', 'board',
+              'street', 'players',
               'players_seated', 'dealer', 'dealer_seat', 'position', 'first_to_act',
               'pot_bb', 'to_call_bb', 'taps'):
         print(f'{k}: {state[k]}')

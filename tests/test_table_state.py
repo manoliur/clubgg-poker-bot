@@ -61,6 +61,57 @@ class ButtonsTest(unittest.TestCase):
             self.assertTrue(0 < x < W and H * 0.86 < y < H, (name, x, y))
 
 
+class RaisePresetsTest(unittest.TestCase):
+    """Правый столбец ставки: какие пресеты видны и какие из них живые."""
+
+    def test_bet_button_alone_when_column_collapsed(self):
+        presets = ts.raise_presets(synth.render(buttons=True))
+        self.assertEqual([p['i'] for p in presets], [0], 'видна только кнопка «Бет»')
+        self.assertTrue(presets[0]['enabled'])
+
+    def test_expanded_column_lists_presets_bottom_up(self):
+        presets = ts.raise_presets(synth.render(buttons=True, presets=3))
+        self.assertEqual([p['i'] for p in presets], [0, 1, 2, 3])
+        self.assertTrue(all(p['enabled'] for p in presets))
+        ys = [p['y'] for p in presets]
+        self.assertEqual(ys, sorted(ys, reverse=True), 'снизу вверх = сверху вниз по y')
+
+    def test_dimmed_preset_is_not_enabled(self):
+        """Пресет меньше минимальной ставки клиент гасит — тап по нему не проходит.
+
+        Живой кадр 15:48:41: банк 2ББ, «33% Бет 0.6ББ» погашен, а эталонная точка
+        рейза бьёт ровно в него — ход сгорел по таймауту.
+        """
+        presets = ts.raise_presets(synth.render(buttons=True, presets=3, dim_presets=(0,)))
+        self.assertFalse(presets[0]['enabled'], 'нижний пресет погашен')
+        self.assertTrue(all(p['enabled'] for p in presets[1:]))
+
+    def test_no_presets_without_buttons(self):
+        self.assertEqual(ts.raise_presets(synth.render(buttons=False)), [])
+
+
+class ShowdownTest(unittest.TestCase):
+    """Вскрытие: плашки «Показать» стоят на местах кнопок, но ходить там нельзя."""
+
+    def test_showdown_is_not_my_turn(self):
+        img = synth.render(hole=['Ah', 'Kd'], board=['2c', '7d', '9s'], showdown=True)
+        self.assertTrue(ts.is_showdown(img))
+        self.assertGreaterEqual(len(ts.detect_action_buttons(img)), 1,
+                                'плашки «Показать» неотличимы от кнопок по форме')
+        self.assertFalse(ts.is_my_turn(img), 'но ходом это не считается')
+
+    def test_normal_turn_is_not_showdown(self):
+        self.assertFalse(ts.is_showdown(synth.render(buttons=True, call_amount=True)))
+        self.assertFalse(ts.is_showdown(synth.render(buttons=False)))
+
+    def test_state_hides_buttons_on_showdown(self):
+        state = ts.read_state(synth.render(hole=['Ah', 'Kd'], showdown=True))
+        self.assertTrue(state['showdown'])
+        self.assertFalse(state['my_turn'])
+        self.assertEqual(state['buttons'], [])
+        self.assertEqual(state['raise_presets'], [])
+
+
 def config_x0(img):
     import config
     return config.ACTION_BAR_X0 * img.shape[1] / config.REF_W

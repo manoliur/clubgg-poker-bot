@@ -23,7 +23,9 @@ YELLOW = (60, 220, 245)
 CYAN = (245, 200, 90)         # BGR голубой — подпись стека («259 ББ»)
 PANEL = (55, 45, 40)
 CARD_BACK = (150, 150, 150)   # серая рубашка карты оппонента
-BTN_GRAY = (55, 55, 55)
+BTN_GRAY = (38, 38, 38)       # живая кнопка действия (в клиенте серый ~37)
+BTN_DIM = (64, 64, 64)        # погашенная кнопка — светлее живой (в клиенте ~62)
+YELLOW_DIM = (110, 150, 155)  # погашенная сумма: тусклая, вне жёлтой маски
 
 BOARD_CARD = (123, 175)       # w, h
 HOLE_CARD = (112, 165)
@@ -100,11 +102,19 @@ def draw_card(img, x, y, w, h, card, index_rect=None, center_picture=True):
         draw_suit(img, x + w // 2, y + int(h * 0.68), int(h * 0.15), suit, color)
 
 
-def draw_button(img, center, w, h, label_yellow=False):
+def draw_button(img, center, w, h, amount=None, disabled=False):
+    """Кнопка полосы действий. amount — жёлтая сумма на ней («Колл 2.5», «Бет 1.3»).
+
+    disabled=True — как гасит кнопку клиент: заливка СВЕТЛЕЕТ, а сумма перестаёт
+    быть ярко-жёлтой. По этим двум признакам table_state.raise_presets и отличает
+    живую кнопку от мёртвой, тап по которой ничего не делает.
+    """
     cx, cy = center
-    _rounded_rect(img, cx - w // 2, cy - h // 2, cx + w // 2, cy + h // 2, BTN_GRAY, r=16)
-    if label_yellow:
-        cv2.putText(img, '2.5', (cx - 40, cy + 15), cv2.FONT_HERSHEY_SIMPLEX, 1.3, YELLOW, 3)
+    fill = BTN_DIM if disabled else BTN_GRAY
+    _rounded_rect(img, cx - w // 2, cy - h // 2, cx + w // 2, cy + h // 2, fill, r=16)
+    if amount is not None:
+        color = YELLOW_DIM if disabled else YELLOW
+        cv2.putText(img, amount, (cx - 40, cy + 15), cv2.FONT_HERSHEY_SIMPLEX, 1.3, color, 3)
 
 
 def draw_seat(img, zone, stack='259', cards=True, name='Player'):
@@ -142,13 +152,19 @@ def draw_dealer(img, zone):
 
 
 def render(hole=None, board=None, buttons=True, call_amount=False,
-           dealer='me', players=2, sitting_out=0, pot_bb=3.0,
-           size=(config.REF_W, config.REF_H)):
+           dealer='me', players=2, sitting_out=0, pot_bb=3.0, presets=0,
+           dim_presets=(), showdown=False, size=(config.REF_W, config.REF_H)):
     """Собрать кадр. hole/board — списки строк карт ('Ah'), None = рубашка.
 
     players — сколько игроков В РАЗДАЧЕ (включая героя), sitting_out — сколько
     ещё занятых мест без карт (сидят вне раздачи). dealer: 'me', 'opp' (первое
     место по кругу за героем), номер места оппонента или None.
+
+    presets — сколько пресетов ставки нарисовать НАД кнопкой «Бет» (клиент
+    показывает их, пока столбец раскрыт шевроном), dim_presets — номера
+    погашенных строк столбца снизу вверх (0 — сама кнопка «Бет»).
+    showdown=True — вскрытие: вместо кнопок действий ряд плашек «Показать» с
+    лицами карт.
     """
     W, H = size
     img = np.zeros((H, W, 3), np.uint8)
@@ -197,12 +213,31 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
     cv2.rectangle(img, (45, int(H * 0.90)), (520, int(H * 0.95)), (48, 48, 48), 2)
 
     # кнопки действий
+    if showdown:
+        # вскрытие: плашки «Показать» стоят ровно на местах кнопок действий,
+        # отличает их только белое лицо карты внутри
+        for center in (config.BTN_FOLD, config.BTN_CALL, config.BTN_RAISE):
+            cx, cy = config.scale(center, W, H)
+            draw_button(img, (cx, cy), int(W * 0.30), int(H * 0.048))
+            draw_card(img, cx + 20, cy - int(H * 0.018), 125, 85, None)
+        return img
+
     if buttons:
         for name, center in (('fold', config.BTN_FOLD), ('call', config.BTN_CALL),
                              ('raise', config.BTN_RAISE)):
             c = config.scale(center, W, H)
-            draw_button(img, c, int(W * 0.30), int(H * 0.048),
-                        label_yellow=(name == 'call' and call_amount))
+            amount = '2.5' if name == 'call' and call_amount else None
+            if name == 'raise':
+                amount = '1.3'        # клиент всегда пишет размер на кнопке «Бет»
+            draw_button(img, c, int(W * 0.30), int(H * 0.048), amount=amount,
+                        disabled=(name == 'raise' and 0 in dim_presets))
+        # пресеты покрупнее над кнопкой «Бет» (строки config.PRESET_ROWS снизу вверх)
+        for i in range(1, min(presets + 1, len(config.PRESET_ROWS))):
+            x0, y0, x1, y1 = config.rect_px(
+                config.PRESET_X[:1] + config.PRESET_ROWS[i][:1]
+                + config.PRESET_X[1:] + config.PRESET_ROWS[i][1:], W, H)
+            draw_button(img, ((x0 + x1) // 2, (y0 + y1) // 2), x1 - x0, y1 - y0,
+                        amount=str(i + 1), disabled=(i in dim_presets))
     return img
 
 

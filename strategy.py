@@ -2,7 +2,8 @@
 """Табличная стратегия NLH без ИИ: префлоп по позиции, постфлоп по силе руки.
 
 Вход — состояние стола (table_state.read_state), выход — решение:
-    {'action': 'fold'|'check'|'call'|'raise', 'amount_bb': float|None, 'reason': str}
+    {'action': 'fold'|'check'|'call'|'raise', 'amount_bb': float|None, 'reason': str,
+     'pot_frac': float|None}   # доля банка у ставки — по ней бот выбирает пресет
 
 Префлоп: диапазоны стартовых рук по позициям (стиль ТАГ из strategy.md),
 плюс формула Чена как запасная оценка, когда позиция не определена.
@@ -334,8 +335,19 @@ def pot_odds(to_call_bb, pot_bb):
     return to_call_bb / total if total > 0 else None
 
 
-def _d(action, reason, amount=None):
-    return {'action': action, 'amount_bb': amount, 'reason': reason}
+def _d(action, reason, amount=None, pot_frac=None):
+    return {'action': action, 'amount_bb': amount, 'reason': reason, 'pot_frac': pot_frac}
+
+
+def _raise_pot(reason, pot_bb, fraction):
+    """Ставка/рейз размером в долю банка: кроме суммы в ББ отдаём саму долю.
+
+    Долю просит главный цикл: размер ставки в клиенте задаётся не числом, а
+    выбором пресета в правом столбце (33/50/75/100% банка). Сумма в ББ считается
+    только при известном банке (эталонов цифр может не быть вовсе), а доля
+    известна всегда — по ней и выбирается пресет.
+    """
+    return _d('raise', reason, _bet_size(pot_bb, fraction), pot_frac=fraction)
 
 
 # --------------------------------------------------------------------------
@@ -399,7 +411,7 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
 
     if has_bet:
         if made in ('nuts', 'strong'):
-            return _d('raise', f'{name}: рейз на велью', _bet_size(pot_bb, cbet * 1.5))
+            return _raise_pot(f'{name}: рейз на велью', pot_bb, cbet * 1.5)
         if made == 'medium':
             if price is not None and price > st['medium_max_price']:
                 return _d('fold', f'{name}: цена {price:.0%} банка слишком высока для средней руки')
@@ -413,7 +425,7 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
             if equity > price:
                 return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > цены {price:.0%}')
             if street == 'flop' and 'flush' in draws and hu:
-                return _d('raise', f'сильное дро {draws}: полу-блеф', _bet_size(pot_bb, semi))
+                return _raise_pot(f'сильное дро {draws}: полу-блеф', pot_bb, semi)
             return _d('fold', f'дро {draws}: {equity:.0%} < цены {price:.0%}')
         if price is not None and price < st['cheap_price'] and street != 'river':
             return _d('call', f'{name}: дёшево ({price:.0%}) — смотрим следующую карту')
@@ -421,18 +433,17 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
 
     # нам чекнули / мы первые
     if made in ('nuts', 'strong'):
-        return _d('raise', f'{name}: ставка на велью', _bet_size(pot_bb, cbet))
+        return _raise_pot(f'{name}: ставка на велью', pot_bb, cbet)
     if made == 'medium':
         if street == 'flop':
-            return _d('raise', f'{name}: конт-бет', _bet_size(pot_bb, cbet * 0.8))
+            return _raise_pot(f'{name}: конт-бет', pot_bb, cbet * 0.8)
         return _d('check', f'{name}: контроль банка на {street}')
     if made == 'draw' or draws:
         if street in ('flop', 'turn') and hu:
-            return _d('raise', f'дро {draws} ({outs} аутов): полу-блеф',
-                      _bet_size(pot_bb, semi))
+            return _raise_pot(f'дро {draws} ({outs} аутов): полу-блеф', pot_bb, semi)
         return _d('check', f'дро {draws}: смотрим карту бесплатно')
     if street == 'flop' and hu:
-        return _d('raise', 'воздух: конт-бет один раз в хедз-апе', _bet_size(pot_bb, semi))
+        return _raise_pot('воздух: конт-бет один раз в хедз-апе', pot_bb, semi)
     return _d('check', f'{name}: чек')
 
 
@@ -502,6 +513,10 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
         decision = _d('fold', decision['reason'] + ' (чек невозможен — есть ставка)')
     if not has_bet and decision['action'] == 'call':
         decision = _d('check', decision['reason'] + ' (ставки нет — чек)')
+    if not has_bet and decision['action'] == 'fold':
+        # без ставки кнопки «Фолд» нет: на её месте «Чек/Фолд», и тап туда
+        # выбросил бы руку там, где ход бесплатный
+        decision = _d('check', decision['reason'] + ' (ставки нет — фолдить незачем)')
     return decision
 
 
