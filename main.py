@@ -125,6 +125,20 @@ class Bot:
                 return False
         return True
 
+    @staticmethod
+    def _sig(state):
+        """Сигнатура состояния: (карты, улица, доска, ставка, сумма колла).
+
+        to_call_bb (жёлтая сумма на кнопке колла) включена, потому что ререйз
+        оппонента меняет именно её, тогда как has_bet остаётся True. Без неё
+        после нашего рейза бот не видит переставку и молчит до таймаута
+        (живой тест: QQ -> RAISE, оппонент переставил — бот спасовал по таймеру).
+        """
+        tc = state.get('to_call_bb')
+        return (tuple(c for c in state['hole'] if c), state['street'],
+                tuple(state['board']), state['has_bet'],
+                round(tc, 1) if tc is not None else None)
+
     # ---------- вспомогательное ----------
     def log(self, msg):
         line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
@@ -305,8 +319,7 @@ class Bot:
                             time.sleep(interval)
                         continue
                     now = time.time()
-                    sig = (tuple(c for c in state['hole'] if c), state['street'],
-                           tuple(state['board']), state['has_bet'])
+                    sig = self._sig(state)
                     if sig == acted_sig and now - acted_ts < retry_after:
                         self.stable = 0      # тот же ход, где мы уже сыграли
                         if interval:
@@ -362,8 +375,7 @@ class Bot:
                     acted_ts = time.time()
                     # сигнатура по состоянию, на котором РЕАЛЬНО сыграли (после
                     # перечитывания карт оно могло измениться — иначе сыграем дважды)
-                    acted_sig = (tuple(c for c in state['hole'] if c), state['street'],
-                                 tuple(state['board']), state['has_bet'])
+                    acted_sig = self._sig(state)
                 except subprocess.TimeoutExpired:
                     self.log('adb не ответил, пауза 3с')
                     time.sleep(3)

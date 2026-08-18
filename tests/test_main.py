@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import card_reader                      # noqa: E402
 import config                           # noqa: E402
 import main as main_mod                 # noqa: E402
+import table_state as ts                # noqa: E402
 from build_templates import collect     # noqa: E402
 from main import Bot                    # noqa: E402
 from tests import synth                 # noqa: E402
@@ -218,6 +219,39 @@ class MainLoopTest(unittest.TestCase):
         with mock.patch.object(main_mod.time, 'sleep'):
             bot.run(interval=0, settle=0, max_actions=5, retry_after=1000)
         self.assertEqual(bot.actions, 2, 'флоп -> тёрн = два решения')
+        self.assertEqual(len(screen.taps), 2)
+
+    def test_acts_again_when_opponent_reraises(self):
+        """Ререйз оппонента = новая сумма колла -> играем снова, а не молчим.
+
+        Живой тест: QQ -> RAISE, оппонент переставил; сигнатура не учитывала
+        to_call_bb, has_bet оставался True, и бот просидел до таймаута (фолд).
+        """
+        frame = synth.render(hole=['Qs', 'Qc'], board=[], buttons=True,
+                             call_amount=True, dealer='opp', players=2)
+        base = ts.read_state(frame, tpl_dir=self.tpl)
+        base['my_turn'] = True
+        base['in_hand'] = True
+        st1 = dict(base)
+        st1['to_call_bb'] = 1.0          # рейз оппонента, который мы переставили
+        st1['has_bet'] = True
+        st2 = dict(base)
+        st2['to_call_bb'] = 6.0          # после нашего рейза оппонент переставил
+        st2['has_bet'] = True
+        self.assertNotEqual(Bot._sig(st1), Bot._sig(st2),
+                            'ререйз обязан менять сигнатуру (сумма колла)')
+        states = iter([st1] * 4 + [st2] * 4)
+
+        def fake_read(img, tpl_dir=None):
+            return next(states)
+
+        screen = FakeScreen([frame] * 8)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'), \
+             mock.patch.object(main_mod.ts, 'read_state', side_effect=fake_read):
+            bot.run(interval=0, settle=0, max_actions=5, retry_after=1000)
+        self.assertEqual(bot.actions, 2, 'ререйз оппонента = новое решение')
         self.assertEqual(len(screen.taps), 2)
 
     def test_raise_not_retried_on_same_state(self):
