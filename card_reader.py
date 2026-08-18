@@ -435,12 +435,13 @@ def recognize_corner(corner, ranks, suits):
     if suit is None:                       # нет эталонов масти — хотя бы цвет
         suit, s_score = ('h' if color == 'red' else 's'), 0.0
 
-    # «10» — единственный ранг из двух глифов, его бокс заметно шире прочих
+    # «10» — единственный ранг из двух глифов; эталон T сравнивается как обычный,
+    # а широкий бокс — запасной путь, если эталона T нет (живой шрифт компактный,
+    # wide=0.7, поэтому без эталона десятка не читалась вовсе)
     if g['rank_parts'] >= 2 and g['rank_wide'] >= T_WIDTH:
         rank, r_score = 'T', 1.0
     else:
-        allowed_ranks = [r for r in ranks if r != 'T'] or None
-        rank, r_score = match_best(g['rank_img'], ranks, allowed=allowed_ranks)
+        rank, r_score = match_best(g['rank_img'], ranks)
 
     if rank is None:
         return None, 0.0, {'reason': 'no rank templates', 'color': color}

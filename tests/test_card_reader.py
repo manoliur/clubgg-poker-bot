@@ -60,7 +60,8 @@ class CardReaderTest(unittest.TestCase):
         n_rank, n_suit, skipped = self.build_result
         self.assertEqual(skipped, [])
         self.assertEqual(n_suit, 4)
-        self.assertEqual(n_rank, 12, 'все ранги кроме T (T узнаётся по двум глифам)')
+        self.assertEqual(n_rank, 13, 'все ранги включая T (живой шрифт компактный, '
+                                     'wide=0.7<0.9 — без эталона десятка не читалась)')
 
     def test_board_detected(self):
         boxes = card_reader.find_board_cards(

@@ -67,9 +67,10 @@ def collect(labels, base=None, tpl_dir=None, verbose=True):
                 skipped.append(f'{item["file"]} {label}: глифы не найдены')
                 continue
             rank, suit = label[0], label[1]
-            # «10» распознаётся по двум глифам — эталон ранга T необязателен
-            if rank != 'T':
-                acc_rank.setdefault(rank, []).append(g['rank_img'])
+            # «10» — тоже обычный эталон: правило «двух глифов и широкого бокса»
+            # не работает на живых кадрах ClubGG (компактный шрифт, wide=0.7<0.9),
+            # без эталона любая десятка читалась как мусор и фолдились AQ/KQ
+            acc_rank.setdefault(rank, []).append(g['rank_img'])
             if g['suit_img'] is not None:
                 acc_suit.setdefault(suit, []).append(g['suit_img'])
             if verbose:
