@@ -405,6 +405,29 @@ def read_number(img, rect, ink='yellow', digits=None, tpl_dir=None):
         return None
 
 
+def call_amount_fp(img):
+    """Отпечаток зоны жёлтой суммы на кнопке «Колл».
+
+    Цифры суммы не читаются (нет эталонов), но САМА сумма меняется при
+    ререйзе/переставке — меняется и раскладка жёлтых пикселей. Отпечаток
+    (сетка 8x4, квантованная) включается в сигнатуру состояния: без него
+    ререйз невидим (has_bet остаётся True, to_call_bb=None), и бот молчит
+    до следующей карты (живой тест: CALL -> оппонент переставил -> тишина).
+    """
+    H, W = img.shape[:2]
+    x1 = int(config.CALL_AMOUNT_X[0] / config.REF_W * W)
+    x2 = int(config.CALL_AMOUNT_X[1] / config.REF_W * W)
+    y1 = int(config.ACTION_BAR_Y[0] * H)
+    y2 = int(config.ACTION_BAR_Y[1] * H)
+    crop = img[y1:y2, x1:x2]
+    if crop.size == 0:
+        return (0,) * 32
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    yellow = cv2.inRange(hsv, (20, 80, 120), (40, 255, 255))
+    small = cv2.resize(yellow, (8, 4), interpolation=cv2.INTER_AREA)
+    return tuple(int(v / 51) for v in small.flatten())
+
+
 # --------------------------------------------------------------------------
 # позиции и очерёдность
 # --------------------------------------------------------------------------
@@ -504,6 +527,7 @@ def read_state(img, tpl_dir=None):
         'buttons': buttons,
         'n_buttons': len(buttons),
         'has_bet': bet,
+        'call_fp': call_amount_fp(img),
         'hole': hole,
         'board': board,
         'street': street,

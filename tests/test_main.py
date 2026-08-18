@@ -254,6 +254,63 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(bot.actions, 2, 'ререйз оппонента = новое решение')
         self.assertEqual(len(screen.taps), 2)
 
+    def test_acts_again_after_opponent_turn_same_sig(self):
+        """Ход уходил к оппоненту и вернулся при ТОЙ ЖЕ сигнатуре = ререйз.
+
+        Живой тест: сумма колла не читается (нет эталонов цифр, to_call_bb=None
+        всегда), поэтому ререйз НЕ меняет сигнатуру. Различаем его по факту:
+        между нашими ходами был кадр my_turn=False (оппонент переставил).
+        """
+        frame = synth.render(hole=['Qs', 'Qc'], board=[], buttons=True,
+                             call_amount=True, dealer='opp', players=2)
+        base = ts.read_state(frame, tpl_dir=self.tpl)
+        base['my_turn'] = True
+        base['in_hand'] = True
+        base['to_call_bb'] = None          # OCR суммы не работает — как вживую
+        base['has_bet'] = True
+        mine = dict(base)                  # наш ход (до и после ререйза — одна сигнатура)
+        opp = dict(base)
+        opp['my_turn'] = False             # оппонент думает/переставляет
+        states = iter([mine, mine] + [opp] * 3 + [mine] * 4)
+
+        def fake_read(img, tpl_dir=None):
+            return next(states)
+
+        screen = FakeScreen([frame] * 12)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'), \
+             mock.patch.object(main_mod.ts, 'read_state', side_effect=fake_read):
+            bot.run(interval=0, settle=0, max_actions=5, retry_after=1000)
+        self.assertEqual(bot.actions, 2,
+                         'ход вернулся после оппонента = новое решение, не таймаут')
+        self.assertEqual(len(screen.taps), 2)
+
+    def test_call_fp_changes_on_reraise(self):
+        """Отпечаток зоны суммы меняется при переставке: ререйз виден даже
+        когда to_call_bb не читается.
+
+        Живой баг: CALL -> оппонент переставил -> has_bet остался True,
+        to_call_bb=None, сигнатура не менялась, бот молчал до следующей карты.
+        call_fp (раскладка жёлтых пикселей суммы) — единственный сигнал.
+        """
+        import numpy as np
+        f1 = synth.render(hole=['Qs', 'Qc'], board=[], buttons=True,
+                          call_amount=True, dealer='opp', players=2)
+        st1 = ts.read_state(f1, tpl_dir=self.tpl)
+        # «переставка»: та же доска, та же ставка (True), но сумма больше
+        f2 = synth.render(hole=['Qs', 'Qc'], board=[], buttons=True,
+                          call_amount=True, dealer='opp', players=2)
+        st2 = ts.read_state(f2, tpl_dir=self.tpl)
+        st2['to_call_bb'] = 8.0           # ререйз: колл дороже
+        st1['to_call_bb'] = 2.5
+        st1['has_bet'] = st2['has_bet'] = True
+        # синтетика рисует одинаковую сумму — подменим отпечаток руками:
+        # разные суммы = разные раскладки пикселей
+        st2['call_fp'] = tuple((i * 7) % 5 for i in range(32))
+        self.assertNotEqual(Bot._sig(st1), Bot._sig(st2),
+                            'переставка обязана менять сигнатуру (call_fp)')
+
     def test_raise_not_retried_on_same_state(self):
         """Рейз не повторяем: второй тап по «Бет» = двойная ставка."""
         frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
