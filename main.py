@@ -109,6 +109,22 @@ class Bot:
         except OSError:
             pass
 
+    @staticmethod
+    def _cards_ok(state, min_rank=0.6):
+        """Обе карманные карты распознаны И уверенно (rank_score >= min_rank).
+
+        Слабый эталон «2» (0.51-0.55 против порога 0.45) пропускал искажённые
+        «7» как «2» (живой тест: фолд карманных 77). Низкоуверенное чтение
+        отбрасываем — перечитываем кадр или играем безопасно.
+        """
+        detail = state['cards_detail']['hole']
+        if len(detail) < 2:
+            return False
+        for d in detail[:2]:
+            if not d['card'] or d.get('rank_score', 0) < min_rank:
+                return False
+        return True
+
     # ---------- вспомогательное ----------
     def log(self, msg):
         line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
@@ -320,12 +336,12 @@ class Bot:
                     if self.stable < stable_frames:
                         continue             # без паузы: добираем подтверждающий кадр
                     self.stable = 0
-                    # подтверждение КАРТ: действуем только когда видны обе карманные
-                    # карты (живой тест: [None,2c] и 7d->2d ломали решения). Перечитываем
-                    # кадр до card_confirm раз; если карты так и не прочитались —
-                    # действуем безопасно (step сам выберет чек/фолд).
+                    # подтверждение КАРТ: действуем только когда обе карманные карты
+                    # распознаны и уверенно (живые тесты: [None,2c] и 7d->2d ломали
+                    # решения). Перечитываем кадр до card_confirm раз; если так и не
+                    # вышло — действуем безопасно (step сам выберет чек/фолд).
                     for _ in range(card_confirm):
-                        if len([c for c in state['hole'] if c]) == 2:
+                        if self._cards_ok(state):
                             break
                         img = self.screen.grab()
                         if img is None:
