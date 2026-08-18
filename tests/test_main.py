@@ -189,8 +189,35 @@ class MainLoopTest(unittest.TestCase):
         bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
                   history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
         with mock.patch.object(main_mod.time, 'sleep'):
-            bot.run(interval=0, settle=0, max_actions=2)
+            # retry_after=0: состояние не меняется -> считаем тап не прошедшим и повторяем
+            bot.run(interval=0, settle=0, max_actions=2, retry_after=0)
         self.assertEqual(bot.actions, 2)
+        self.assertEqual(len(screen.taps), 2)
+
+    def test_no_double_action_on_same_state(self):
+        """После хода на том же состоянии (панель не исчезла) повторно не тапаем."""
+        frame = synth.render(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], buttons=True,
+                             call_amount=True, dealer='opp', players=2)
+        screen = FakeScreen([frame] * 10)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, max_actions=5, retry_after=1000)
+        self.assertEqual(bot.actions, 1, 'одинаковые кадры = один ход, без повторов')
+        self.assertEqual(len(screen.taps), 1)
+
+    def test_acts_again_when_state_changes(self):
+        """Оппонент сыграл (доска сменилась) -> бот действует на новом состоянии."""
+        f1 = synth.render(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], buttons=True,
+                          call_amount=True, dealer='opp', players=2)
+        f2 = synth.render(hole=['7h', '2c'], board=['Ad', 'Ks', '9c', '2h'], buttons=True,
+                          call_amount=True, dealer='opp', players=2)
+        screen = FakeScreen([f1] * 4 + [f2] * 4)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, max_actions=5, retry_after=1000)
+        self.assertEqual(bot.actions, 2, 'флоп -> тёрн = два решения')
         self.assertEqual(len(screen.taps), 2)
 
     def test_run_gives_up_when_no_frames(self):

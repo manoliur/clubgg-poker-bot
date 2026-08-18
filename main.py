@@ -91,6 +91,7 @@ class Bot:
         self.last_action_ts = 0.0
         self.last_state = None
         self.stable = 0
+        self._retries = 0
         self.actions = 0
         self.stats = {'fold': 0, 'check': 0, 'call': 0, 'raise': 0}
         self.started = time.time()
@@ -139,14 +140,18 @@ class Bot:
         return action, point
 
     # ---------- один шаг ----------
-    def step(self, img=None):
-        """Один проход. Возвращает запись раздачи (dict) или None, если ход не наш."""
-        img = self.screen.grab() if img is None else img
-        if img is None:
-            self.log('ERR: не получен скриншот (adb)')
-            return None
+    def step(self, img=None, state=None):
+        """Один проход. Возвращает запись раздачи (dict) или None, если ход не наш.
 
-        state = ts.read_state(img, tpl_dir=self.tpl_dir)
+        state можно передать готовым (run читает его для своих проверок) — тогда
+        повторно кадр не снимается и состояние не перечитывается.
+        """
+        if state is None:
+            img = self.screen.grab() if img is None else img
+            if img is None:
+                self.log('ERR: не получен скриншот (adb)')
+                return None
+            state = ts.read_state(img, tpl_dir=self.tpl_dir)
         self.last_state = state
         if not state['my_turn']:
             self.stable = 0
@@ -225,11 +230,26 @@ class Bot:
         return False
 
     # ---------- цикл ----------
-    def run(self, interval=1.2, settle=2.5, stable_frames=2, max_actions=None,
-            fail_limit=30):
-        """Бесконечный игровой цикл. max_actions — сыграть N решений и выйти."""
+    def run(self, interval=0.8, settle=2.5, stable_frames=2, max_actions=None,
+            fail_limit=30, retry_after=25.0):
+        """Игровой цикл, реактивный по состоянию.
+
+        После своего хода НЕ ждём исчезновения кнопок (в ClubGG панель остаётся
+        на экране, пока думает оппонент): следующее действие наступает, когда
+        состояние стола ИЗМЕНИЛОСЬ (новая улица/доска/ставка/раздача) — сигнатура
+        (карты, улица, доска, ставка) не совпадает с той, где мы уже сыграли.
+        Это убирает многоминутные паузы и защищает от двойного тапа.
+
+        Если состояние не меняется дольше retry_after секунд — считаем, что тап
+        не прошёл, и повторяем решение (не чаще 2 раз подряд, потом пауза 30с).
+
+        idle-поллинг с паузой interval; на ходу кадры снимаются подряд (без паузы),
+        два стабильных кадра подряд = ход действительно наш (не анимация).
+        """
         self.log('=== БОТ ЗАПУЩЕН (без ИИ) ===' + (' dry-run' if self.dry_run else ''))
         fails = 0
+        acted_sig = None
+        acted_ts = 0.0
         try:
             while max_actions is None or self.actions < max_actions:
                 try:
@@ -244,26 +264,48 @@ class Bot:
                         time.sleep(2)
                         continue
                     fails = 0
-                    if not ts.is_my_turn(img):
+                    state = ts.read_state(img, tpl_dir=self.tpl_dir)
+                    if not (state['my_turn'] and state['in_hand']):
                         self.stable = 0
-                        time.sleep(interval)
+                        if interval:
+                            time.sleep(interval)
                         continue
-                    # два кадра подряд с кнопками = ход действительно наш (не анимация)
+                    now = time.time()
+                    sig = (tuple(c for c in state['hole'] if c), state['street'],
+                           tuple(state['board']), state['has_bet'])
+                    if sig == acted_sig and now - acted_ts < retry_after:
+                        self.stable = 0      # тот же ход, где мы уже сыграли
+                        if interval:
+                            time.sleep(interval)
+                        continue
+                    if sig == acted_sig:     # состояние не меняется — тап мог не пройти
+                        if self._retries >= 2:
+                            self.log('состояние не изменилось после повторных тапов — пауза')
+                            acted_ts = now + 30
+                            self._retries = 0
+                            if interval:
+                                time.sleep(interval)
+                            continue
+                        self._retries += 1
+                        self.log('состояние не изменилось после хода — повторяю решение')
+                    else:
+                        self._retries = 0
+                    if now - acted_ts < settle:   # кулдаун после своего тапа
+                        if interval:
+                            time.sleep(interval)
+                        continue
+                    # два кадра подряд с кнопками и картами = ход действительно наш
                     self.stable += 1
                     if self.stable < stable_frames:
-                        time.sleep(interval)
-                        continue
-                    if time.time() - self.last_action_ts < settle:
-                        time.sleep(interval)  # кнопки ещё не убрались после нашего тапа
-                        continue
+                        continue             # без паузы: добираем подтверждающий кадр
                     self.stable = 0
-                    entry = self.step(img)
+                    entry = self.step(img, state)
                     if entry is None:
-                        time.sleep(interval)
+                        if interval:
+                            time.sleep(interval)
                         continue
-                    time.sleep(settle)
-                    if not self.dry_run:
-                        self.wait_until_idle(interval)
+                    acted_ts = time.time()
+                    acted_sig = sig
                 except subprocess.TimeoutExpired:
                     self.log('adb не ответил, пауза 3с')
                     time.sleep(3)
@@ -291,7 +333,7 @@ def main(argv=None):
     ap.add_argument('--dry-run', action='store_true', help='не тапать, только логировать')
     ap.add_argument('--once', action='store_true', help='один проход и выход')
     ap.add_argument('--image', help='разобрать кадр из файла вместо телефона')
-    ap.add_argument('--interval', type=float, default=1.2, help='пауза между кадрами, с')
+    ap.add_argument('--interval', type=float, default=0.8, help='пауза между кадрами, с (только когда не наш ход; на ходу — подряд)')
     ap.add_argument('--settle', type=float, default=2.5, help='пауза после своего хода, с')
     ap.add_argument('--stack', type=float, default=69.6, help='стек в ББ')
     ap.add_argument('--max-actions', type=int, help='сыграть N решений и выйти')

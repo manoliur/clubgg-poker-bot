@@ -84,31 +84,44 @@ def detect_action_buttons(img):
     """Настоящие кнопки действий в нижней полосе (правее автодействия).
 
     Возвращает список dict: x, y, x0, x1, w (координаты экрана, центр — x,y).
+    Ложные «кнопки» отсекаются: фон панели/меню паузы — это широкий серый
+    прямоугольник (на 1080 ~560px), который покрывает сразу оба центра (Колл и
+    Бет); настоящая кнопка уже MAX_BTN_W и покрывает ровно один центр.
     """
     H, W = img.shape[:2]
     y0, y1 = int(H * config.ACTION_BAR_Y[0]), int(H * config.ACTION_BAR_Y[1])
     x_min = int(config.ACTION_BAR_X0 * W / config.REF_W)
+    call_x = config.BTN_CALL[0] * W / config.REF_W
+    raise_x = config.BTN_RAISE[0] * W / config.REF_W
     strip = img[y0:y1, :]
     mask = gray_button_mask(strip)
     col = (mask > 0).sum(axis=0)
     min_col = max(4, int((y1 - y0) * 0.25))     # столбец внутри кнопки — заметно заполнен
     filled = col >= min_col
 
-    buttons, run = [], None
+    runs, run = [], None
     for x in range(W):
         if filled[x] and x >= x_min:
             run = x if run is None else run
         elif run is not None:
-            if x - run > W * 0.09:              # кнопка шире ~100px на 1080
-                buttons.append({'x0': run, 'x1': x - 1})
+            runs.append((run, x - 1))
             run = None
-    if run is not None and W - run > W * 0.09:
-        buttons.append({'x0': run, 'x1': W - 1})
+    if run is not None:
+        runs.append((run, W - 1))
 
-    for b in buttons:
-        b['w'] = b['x1'] - b['x0']
-        b['x'] = (b['x0'] + b['x1']) // 2
-        b['y'] = (y0 + y1) // 2
+    buttons = []
+    for x0, x1 in runs:
+        w = x1 - x0
+        if w <= W * 0.09:                       # слишком узко
+            continue
+        if w > MAX_BTN_W * W:                   # слишком широко — фон панели, не кнопка
+            continue
+        has_call = x0 <= call_x <= x1
+        has_raise = x0 <= raise_x <= x1
+        if has_call == has_raise:               # ни одного центра ИЛИ оба сразу — мусор
+            continue
+        buttons.append({'x0': x0, 'x1': x1, 'w': w,
+                        'x': (x0 + x1) // 2, 'y': (y0 + y1) // 2})
     return buttons
 
 
@@ -171,6 +184,7 @@ GLYPH_H = (0.005, 0.015)
 GLYPH_MIN_AREA = 60
 PANEL_MIN_GLYPHS = 3        # минимум «0 ББ»
 CARD_BACK_MIN = 0.12        # доля серого (рубашки карт) в окне над плашкой
+MAX_BTN_W = 0.34            # кнопка действия не шире 34% экрана (фон панели шире)
 
 
 def _stack_glyphs(img):

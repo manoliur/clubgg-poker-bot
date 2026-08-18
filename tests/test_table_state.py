@@ -11,6 +11,7 @@ import cv2
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import table_state as ts                # noqa: E402
 import card_reader                      # noqa: E402
+import config                           # noqa: E402
 from build_templates import collect     # noqa: E402
 from tests import synth                 # noqa: E402
 
@@ -32,6 +33,20 @@ class ButtonsTest(unittest.TestCase):
         img = synth.render(hole=['Ah', 'Kd'], buttons=False)
         for b in ts.detect_action_buttons(img):
             self.assertGreaterEqual(b['x0'], int(config_x0(img)), b)
+
+    def test_wide_bar_background_is_not_a_button(self):
+        """Фон панели (широкий серый прямоугольник справа) — не кнопка.
+
+        В ClubGG панель действий остаётся на экране, даже когда ход не наш
+        (меню паузы, «сидеть за столом»): это широкий серый прямоугольник,
+        покрывающий сразу оба центра (Колл и Бет). Настоящая кнопка уже и
+        покрывает ровно один центр.
+        """
+        img = synth.render(buttons=False)
+        H, W = img.shape[:2]
+        img[int(H * config.ACTION_BAR_Y[0]):, int(W * 0.48):] = (55, 55, 55)
+        self.assertEqual(ts.detect_action_buttons(img), [])
+        self.assertFalse(ts.is_my_turn(img))
 
     def test_bet_detected_by_yellow_amount(self):
         self.assertTrue(ts.has_bet(synth.render(call_amount=True)))
