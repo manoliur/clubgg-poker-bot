@@ -241,7 +241,8 @@ class Bot:
             'dry_run': self.dry_run,
         }
         self.log(f"#{self.hand_id} {state['street']} {state['hole']} доска={state['board']} "
-                 f"поз={state['position']} игроков={state['players']} "
+                 f"поз={state['position']} игроков={state['players']}"
+                 f"({state['players_seated']} сидят) "
                  f"ставка={'да' if state['has_bet'] else 'нет'} -> {action.upper()} "
                  f"({reason})")
         if len(hole) < 2:
