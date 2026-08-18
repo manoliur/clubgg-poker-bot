@@ -92,6 +92,7 @@ class Bot:
         self.last_state = None
         self.stable = 0
         self._retries = 0
+        self._last_action = None
         self.actions = 0
         self.stats = {'fold': 0, 'check': 0, 'call': 0, 'raise': 0}
         self.started = time.time()
@@ -206,6 +207,7 @@ class Bot:
         self.record(entry)
         self.actions += 1
         self.stats[action] = self.stats.get(action, 0) + 1
+        self._last_action = action
         self.last_action_ts = time.time()
         return entry
 
@@ -279,8 +281,11 @@ class Bot:
                             time.sleep(interval)
                         continue
                     if sig == acted_sig:     # состояние не меняется — тап мог не пройти
-                        if self._retries >= 2:
-                            self.log('состояние не изменилось после повторных тапов — пауза')
+                        # Повторяем ТОЛЬКО чек/фолд: повторный тап по «Бет»/«Колл» =
+                        # двойная ставка (рейз/колл того же размера второй раз).
+                        if self._last_action not in ('check', 'fold') or self._retries >= 2:
+                            self.log('состояние не изменилось после хода — жду изменения '
+                                     '(повтор опасен для этого действия)')
                             acted_ts = now + 30
                             self._retries = 0
                             if interval:

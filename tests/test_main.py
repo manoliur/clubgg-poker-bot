@@ -220,6 +220,31 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(bot.actions, 2, 'флоп -> тёрн = два решения')
         self.assertEqual(len(screen.taps), 2)
 
+    def test_raise_not_retried_on_same_state(self):
+        """Рейз не повторяем: второй тап по «Бет» = двойная ставка."""
+        frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                             call_amount=True, dealer='me', players=2)   # сет -> рейз
+        screen = FakeScreen([frame] * 8)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, max_actions=5, retry_after=0)
+        self.assertEqual(bot.actions, 1, 'рейз повторно не тапаем')
+        self.assertEqual(len(screen.taps), 1)
+
+    def test_check_retried_when_tap_missed(self):
+        """Чек при непрошедшем тапе повторяем (повторный чек безвреден)."""
+        # комбо из живой игры: Kh2h на ривере -> «смотрим карту бесплатно» (чек)
+        frame = synth.render(hole=['Kh', '2h'], board=['6s', '4d', '9d', '4h', '3c'],
+                             buttons=True, call_amount=False, dealer='opp', players=2)
+        screen = FakeScreen([frame] * 8)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, max_actions=2, retry_after=0)
+        self.assertEqual(bot.actions, 2, 'чек повторяем, пока состояние не сменилось')
+        self.assertEqual(len(screen.taps), 2)
+
     def test_run_gives_up_when_no_frames(self):
         """Телефон отключён (grab() -> None): цикл не висит вечно, а выходит."""
         bot, screen = self.make_bot([])
