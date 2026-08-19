@@ -467,6 +467,10 @@ def dealer_seat(x, y, img, panels=None):
     Плашек не нашлось — падаем на грубое правило «низ экрана = моя кнопка».
     """
     panels = player_panels_ordered(img) if panels is None else panels
+    if not panels:
+        # маркер D есть, а плашек не распознали (лобби/анимация/меню) —
+        # падать нельзя: цикл живёт на каждом кадре
+        return None, 'me'
     nearest = min(panels, key=lambda p: (p['x'] - x) ** 2 + (p['y'] - y) ** 2)
     if nearest['is_hero']:
         return None, 'me'
