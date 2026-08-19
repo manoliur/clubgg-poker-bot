@@ -91,6 +91,13 @@ DEFAULT_SETTINGS = {
     'preflop_max_price': 0.45,  # префлоп: цена колла в долях банка
 }
 
+# Примерное эквити готовой руки против крупной ставки/алл-ина — по классу силы.
+# Крупная ставка почти всегда значит, что у оппонента тоже что-то есть, поэтому
+# слабый флеш (наша карта масти 6) выигрывает у алл-ина примерно в трети случаев.
+SHOWDOWN_EQUITY = {'nuts': 0.85, 'strong': 0.65, 'medium': 0.45, 'weak': 0.30}
+CALL_MARGIN = 0.05          # запас: коллим, когда цена заметно ниже эквити
+BLIND_PRICE = 0.33          # цена колла, когда чисел банка нет (ставка ~полбанка)
+
 
 # --------------------------------------------------------------------------
 # разбор рук и диапазонов
@@ -339,6 +346,12 @@ def _d(action, reason, amount=None, pot_frac=None):
     return {'action': action, 'amount_bb': amount, 'reason': reason, 'pot_frac': pot_frac}
 
 
+def _odds_note(price, equity):
+    """«пот-оддсы 9%, эквити ~30%» — по этой строке видно, как принято решение."""
+    shown = f'{price:.0%}' if price is not None else f'~{BLIND_PRICE:.0%} (банк неизвестен)'
+    return f'пот-оддсы {shown}, эквити ~{equity:.0%}'
+
+
 def _raise_pot(reason, pot_bb, fraction):
     """Ставка/рейз размером в долю банка: кроме суммы в ББ отдаём саму долю.
 
@@ -441,22 +454,33 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
     cls = he.hand_class(hole, board)
     made, outs, draws = cls['made'], cls['outs'], cls['draws']
     name = cls['name'] or '?'
+    if cls['made_note']:
+        name = f'{name} ({cls["made_note"]})'
     price = pot_odds(to_call_bb, pot_bb)
     equity = he.equity_from_outs(outs, street)
+    showdown = SHOWDOWN_EQUITY.get(made, 0.0)
     hu = players is not None and players <= 2
     cbet, semi = chart.size('cbet_pot'), chart.size('semi_bluff_pot')
+    # Флеш/стрит/фулл: рука сильная по номиналу, но её ранг уже учтён в made —
+    # младшим флешем банк не растят, а против крупной ставки считают шансы.
+    big_made = cls['category'] is not None and cls['category'] >= he.STRAIGHT
 
     if has_bet:
+        if big_made and made in ('medium', 'weak'):
+            # 19.08 15:49 #21: флеш с шестёркой отвечал коллом на алл-ин как натс.
+            # Против алл-ина нас бьёт любая старшая карта масти — решает цена.
+            if (price if price is not None else BLIND_PRICE) < showdown - CALL_MARGIN:
+                return _d('call', f'{name}: колл — {_odds_note(price, showdown)}')
+            return _d('fold', f'{name}: фолд — {_odds_note(price, showdown)}')
         if made in ('nuts', 'strong'):
             if no_raise:
-                price_txt = f' по пот-оддсам {price:.0%}' if price is not None else ''
-                return _d('call', f'{name}: колл против алл-ина{price_txt} '
-                                  '(рейз недоступен)')
+                return _d('call', f'{name}: колл против алл-ина — '
+                                  f'{_odds_note(price, showdown)} (рейз недоступен)')
             return _raise_pot(f'{name}: рейз на велью', pot_bb, cbet * 1.5)
         if made == 'medium':
             if price is not None and price > st['medium_max_price']:
-                return _d('fold', f'{name}: цена {price:.0%} банка слишком высока для средней руки')
-            return _d('call', f'{name}: колл со средней рукой')
+                return _d('fold', f'{name}: средняя рука, {_odds_note(price, showdown)} — фолд')
+            return _d('call', f'{name}: колл со средней рукой, {_odds_note(price, showdown)}')
         if made == 'draw' or draws:
             if price is None:
                 # чисел нет: считаем ставку полубанком (цена ~33%)
@@ -475,6 +499,9 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
     # нам чекнули / мы первые
     if no_raise:
         return _d('check', f'{name}: ставить нечем (живого пресета нет) — чек')
+    if big_made and made == 'weak':
+        # младший флеш/стрит: ставкой мы соберём велью только от того, кто бьёт
+        return _d('check', f'{name}: младшая рука — чек, идём на шоудаун')
     if made in ('nuts', 'strong'):
         return _raise_pot(f'{name}: ставка на велью', pot_bb, cbet)
     if made == 'medium':

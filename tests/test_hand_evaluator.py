@@ -194,5 +194,71 @@ class HandClassTest(unittest.TestCase):
         self.assertEqual(c['made'], 'unknown')
 
 
+class MadeHandRankTest(unittest.TestCase):
+    """Флеш и стрит — не автоматически натс: решает ранг НАШЕЙ карты.
+
+    Живая раздача 19.08 15:49 #21: 6s6c на 2s 8s Qs 4s — «флеш Q», но своя
+    флеш-карта шестёрка, и любая пика 7,9,T,J,K,A у оппонента бьёт нас.
+    """
+
+    LIVE_BOARD = ['2s', '8s', 'Qs', '4s']
+
+    def test_low_flush_card_is_weak(self):
+        c = hand_class(['6s', '6c'], self.LIVE_BOARD)
+        self.assertEqual(c['name'], 'флеш Q')
+        self.assertEqual(c['made'], 'weak', c['made_note'])
+        self.assertIn('6s', c['made_note'])
+
+    def test_flush_grades_by_our_card(self):
+        for hole, made in ((['As', '6c'], 'nuts'), (['Ks', '6c'], 'strong'),
+                           (['Ts', '6c'], 'medium'), (['7s', '6c'], 'medium'),
+                           (['6s', '6c'], 'weak'), (['3s', '6c'], 'weak')):
+            with self.subTest(hole=hole):
+                self.assertEqual(hand_class(hole, self.LIVE_BOARD)['made'], made)
+
+    def test_nut_flush_is_nuts(self):
+        self.assertEqual(hand_class(['Ah', '2h'], ['Kh', '9h', '7h'])['made'], 'nuts')
+
+    def test_king_flush_is_nuts_when_ace_is_on_the_board(self):
+        """Туза масти нет ни у кого: наш король — лучший возможный флеш."""
+        self.assertEqual(hand_class(['Kh', '2c'], ['Ah', '9h', '7h', '5h'])['made'], 'nuts')
+
+    def test_flush_entirely_on_the_board_is_weak(self):
+        """Своей карты масти нет — нас бьёт любая карта масти у оппонента."""
+        c = hand_class(['6c', '2d'], ['Ah', 'Kh', 'Qh', 'Jh', '3h'])
+        self.assertEqual(c['made'], 'weak', c['made_note'])
+
+    def test_low_straight_is_not_nuts(self):
+        c = hand_class(['6c', '5d'], ['2s', '3h', '4c', 'Kd'])
+        self.assertEqual(c['name'], 'стрит до 6')
+        self.assertEqual(c['made'], 'medium', c['made_note'])
+
+    def test_broadway_straight_is_nuts(self):
+        self.assertEqual(hand_class(['Ah', 'Td'], ['Js', 'Qh', 'Kc', '2d'])['made'], 'nuts')
+
+    def test_straight_with_higher_one_possible_is_medium(self):
+        """T-J-Q на доске: наш стрит до Q бьётся любым AK."""
+        c = hand_class(['9h', '8d'], ['Ts', 'Jh', 'Qc', '2d'])
+        self.assertEqual(c['made'], 'medium')
+        self.assertIn('до A', c['made_note'])
+
+    def test_four_flush_board_downgrades_our_set(self):
+        strong = hand_class(['9h', '9d'], ['9s', 'Kh', '2s', '7c', '4c'])
+        self.assertEqual(strong['made'], 'strong')
+        weak = hand_class(['9h', '9d'], ['9s', 'Kh', '2s', '7s', '4s'])
+        self.assertEqual(weak['made'], 'medium', weak['made_note'])
+        self.assertIn('флеш', weak['made_note'])
+
+    def test_full_house_under_a_board_pair_is_medium(self):
+        self.assertEqual(hand_class(['Kh', 'Kd'], ['Ks', '2s', '2h', '7c', '4c'])['made'],
+                         'strong')
+        low = hand_class(['2h', '2d'], ['2s', 'Ks', 'Kh', '7c', '4c'])
+        self.assertEqual(low['made'], 'medium', low['made_note'])
+
+    def test_quads_and_straight_flush_stay_nuts(self):
+        self.assertEqual(hand_class(['9h', '9d'], ['9s', '9c', 'Kh'])['made'], 'nuts')
+        self.assertEqual(hand_class(['Ah', 'Kh'], ['Qh', 'Jh', 'Th'])['made'], 'nuts')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

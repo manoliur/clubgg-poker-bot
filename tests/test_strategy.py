@@ -258,6 +258,65 @@ class AllInDefenceTest(unittest.TestCase):
                 self.assertEqual(post['action'], 'check', post['reason'])
 
 
+class PotOddsTest(unittest.TestCase):
+    """Живая раздача 19.08 15:49 #21: 6s6c на 2s 8s Qs 4s.
+
+    Бот собрал флеш с шестёркой, hand_class выдал «натс», и на алл-ин пошёл
+    колл. Против алл-ина такую руку бьёт любая старшая пика — решать должны
+    шансы банка, а не название комбинации.
+    """
+
+    BOARD = ['2s', '8s', 'Qs', '4s']
+
+    def hand(self, hole=('6s', '6c'), **kw):
+        base = {'hole': list(hole), 'board': self.BOARD, 'street': 'turn',
+                'has_bet': True, 'players': 2, 'no_raise': True}
+        base.update(kw)
+        return st.decide(state(**base))
+
+    def test_pot_odds_formula(self):
+        self.assertAlmostEqual(st.pot_odds(3.0, 30.0), 3.0 / 33.0)
+        self.assertAlmostEqual(st.pot_odds(10.0, 10.0), 0.5)
+        self.assertIsNone(st.pot_odds(None, 10.0))
+
+    def test_weak_flush_folds_to_all_in_at_a_bad_price(self):
+        d = self.hand(to_call_bb=20.0, pot_bb=20.0)          # цена 50%
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('пот-оддсы 50%', d['reason'])
+        self.assertIn('эквити ~30%', d['reason'])
+
+    def test_weak_flush_calls_a_cheap_all_in(self):
+        d = self.hand(to_call_bb=3.0, pot_bb=30.0)           # цена 9% < эквити 30%
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertIn('пот-оддсы 9%', d['reason'])
+
+    def test_weak_flush_does_not_bet_for_value(self):
+        d = self.hand(has_bet=False, no_raise=False, pot_bb=20.0)
+        self.assertEqual(d['action'], 'check', d['reason'])
+
+    def test_medium_flush_calls_where_weak_folds(self):
+        price = {'to_call_bb': 10.0, 'pot_bb': 30.0}         # цена 25%
+        self.assertEqual(self.hand(('Ts', '6c'), **price)['action'], 'call')
+        self.assertEqual(self.hand(('6s', '6c'), **price)['action'], 'fold')
+
+    def test_nut_flush_calls_the_all_in(self):
+        d = self.hand(('As', '6c'), to_call_bb=20.0, pot_bb=20.0)
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertIn('эквити ~85%', d['reason'])
+
+    def test_nut_flush_still_raises_for_value(self):
+        d = self.hand(('As', '6c'), to_call_bb=5.0, pot_bb=20.0, no_raise=False)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        # а младший флеш банк не растит даже против маленькой ставки
+        self.assertEqual(self.hand(to_call_bb=5.0, pot_bb=20.0, no_raise=False)['action'],
+                         'call')
+
+    def test_low_straight_is_not_a_value_raise(self):
+        d = st.decide(state(hole=['6c', '5d'], board=['2s', '3h', '4c', 'Kd'],
+                            street='turn', has_bet=False, pot_bb=20.0, players=2))
+        self.assertNotEqual(d['action'], 'raise', d['reason'])
+
+
 class RobustnessTest(unittest.TestCase):
     def test_unrecognized_cards_are_safe(self):
         d = st.decide(state(hole=[None, None], has_bet=True, to_call_bb=3.0))

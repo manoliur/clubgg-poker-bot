@@ -220,15 +220,110 @@ def equity_from_outs(outs, street):
     return 0.0
 
 
+# --------------------------------------------------------------------------
+# сила готовой руки по рангу составляющих карт
+# --------------------------------------------------------------------------
+# Флеш и стрит — ещё не натс: значение имеет ранг НАШЕЙ карты в комбинации.
+# Живая раздача 19.08 15:49 #21: 6s6c на 2s 8s Qs 4s — «флеш Q», но наша
+# флеш-карта шестёрка, и любая пика 7,9,T,J,K,A у оппонента бьёт нас.
+_STRONG_FLUSH_CARD = RANK_VALUE['K']       # K/A-высокая карта масти — сильный флеш
+_MEDIUM_FLUSH_CARD = RANK_VALUE['7']       # 7..T — средний, ниже — слабый
+
+_DOWNGRADE = {'nuts': 'strong', 'strong': 'medium', 'medium': 'weak', 'weak': 'weak'}
+
+
+def _flush_grade(hole, board):
+    """Сила готового флеша -> ('nuts'/'strong'/'medium'/'weak', пояснение).
+
+    Натс — когда лучший флеш никому не собрать: наши пять карт масти
+    сравниваем с лучшими, что остались в колоде оппоненту (две старшие
+    свободные карты масти + флеш-карты доски). Иначе решает ранг нашей
+    старшей карты этой масти.
+    """
+    hp, bp = parse_cards(hole), parse_cards(board)
+    by_suit = {}
+    for v, s in hp + bp:
+        by_suit.setdefault(s, []).append(v)
+    suit = next((s for s, vs in by_suit.items() if len(vs) >= 5), None)
+    if suit is None:
+        return 'strong', ''
+    board_suited = sorted((v for v, s in bp if s == suit), reverse=True)
+    our_suited = sorted((v for v, s in hp if s == suit), reverse=True)
+    ours = sorted(our_suited + board_suited, reverse=True)[:5]
+    used = set(board_suited) | set(our_suited)
+    free = [v for v in range(14, 1, -1) if v not in used][:2]
+    best = sorted(free + board_suited, reverse=True)[:5]
+    if not our_suited:
+        # флеш целиком на доске: нас бьёт любая карта масти старше младшей на доске
+        note = f'флеш на доске, своей {suit} нет'
+        return ('nuts' if ours >= best else 'weak'), note
+    top = our_suited[0]
+    note = f'наша карта масти {card_str(top, suit)}'
+    if ours >= best:
+        return 'nuts', note
+    if top >= _STRONG_FLUSH_CARD:
+        return 'strong', note
+    if top >= _MEDIUM_FLUSH_CARD:
+        return 'medium', note
+    return 'weak', note
+
+
+def _best_possible_straight(board):
+    """Старшая карта стрита, который может собрать оппонент (добрав 2 карты)."""
+    bv = {v for v, _ in parse_cards(board)}
+    if 14 in bv:
+        bv.add(1)
+    for high in range(14, 4, -1):
+        need = {high - i for i in range(5)}
+        if len(need & bv) >= 3:                 # оппонент добирает не больше двух
+            return high
+    return None
+
+
+def _straight_grade(board, high):
+    """Сила готового стрита -> ('nuts'/'strong'/'medium', пояснение)."""
+    best = _best_possible_straight(board)
+    if best and best > high:
+        return 'medium', f'возможен стрит до {VALUE_RANK[best]}'
+    if high == 14:
+        return 'nuts', 'старший стрит'
+    if high >= RANK_VALUE['Q']:
+        return 'strong', f'стрит до {VALUE_RANK[high]}'
+    return 'medium', f'младший стрит до {VALUE_RANK[high]}'
+
+
+def _full_house_grade(board, score):
+    """Фулл-хаус: strong, но medium, если на доске пара старше нашей тройки."""
+    bv = [v for v, _ in parse_cards(board)]
+    trips = score[1]
+    higher = [v for v in set(bv) if bv.count(v) >= 2 and v > trips]
+    if higher:
+        return 'medium', f'на доске пара {VALUE_RANK[max(higher)]} — возможен фулл выше'
+    return 'strong', ''
+
+
+def _board_flush_threat(hole, board):
+    """На доске 4+ карты одной масти, а флеша у нас нет — у оппонента он возможен."""
+    hp, bp = parse_cards(hole), parse_cards(board)
+    by_suit = {}
+    for v, s in bp:
+        by_suit.setdefault(s, []).append(v)
+    for s, vs in by_suit.items():
+        if len(vs) >= 4 and len(vs) + sum(1 for _, hs in hp if hs == s) < 5:
+            return s
+    return None
+
+
 def hand_class(hole, board):
     """Классификация руки для постфлоп-стратегии.
 
     Возвращает dict: score, category, name, made ('nuts'/'strong'/'medium'/'weak'/'air'),
-    pair_type ('overpair'/'top'/'middle'/'bottom'/None), draws.
+    made_note (чем определена сила), pair_type ('overpair'/'top'/'middle'/'bottom'/None),
+    draws.
     """
     hole, board = list(hole), list(board)
     cards = hole + board
-    result = {'draws': [], 'pair_type': None}
+    result = {'draws': [], 'pair_type': None, 'made_note': ''}
     if len(cards) >= 5:
         score = evaluate(cards)
     else:
@@ -264,8 +359,14 @@ def hand_class(hole, board):
 
     if cat is None:
         result['made'] = 'unknown'
-    elif cat >= FLUSH:
+    elif cat in (STRAIGHT_FLUSH, QUADS):
         result['made'] = 'nuts'
+    elif cat == FULL_HOUSE:
+        result['made'], result['made_note'] = _full_house_grade(board, score)
+    elif cat == FLUSH:
+        result['made'], result['made_note'] = _flush_grade(hole, board)
+    elif cat == STRAIGHT:
+        result['made'], result['made_note'] = _straight_grade(board, score[1])
     elif cat >= TRIPS:
         result['made'] = 'strong'
     elif cat == TWO_PAIR:
@@ -278,6 +379,15 @@ def hand_class(hole, board):
         result['made'] = 'draw'
     else:
         result['made'] = 'air'
+
+    # Флеш у оппонента бьёт всё, что ниже флеша: на доске из 4 карт одной масти
+    # наши стрит/сет/две пары — уже не та рука, с которой играют банк.
+    if cat is not None and PAIR <= cat < FLUSH:
+        threat = _board_flush_threat(hole, board)
+        if threat:
+            result['made'] = _DOWNGRADE.get(result['made'], result['made'])
+            note = f'на доске 4 карты масти {threat} — возможен флеш'
+            result['made_note'] = f'{result["made_note"]}, {note}'.lstrip(', ')
     return result
 
 
