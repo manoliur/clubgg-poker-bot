@@ -44,6 +44,11 @@ CORNER_W, CORNER_H = 0.64, 0.56
 # отступ от края карты, чтобы не цеплять скруглённую рамку/фон
 INSET = 0.06
 
+# различение 2 и 7 по нижней черте глифа (см. resolve_2_vs_7)
+BOTTOM_BAR_FRAC = 0.28      # какая доля высоты глифа считается «низом»
+BOTTOM_BAR_MARGIN = 0.05    # мёртвая зона вокруг середины между эталонами
+BOTTOM_BAR_MIN_GAP = 0.20   # эталоны ближе этого — признак не работает
+
 
 # --------------------------------------------------------------------------
 # эталоны
@@ -386,6 +391,54 @@ def match_best(part, templates, allowed=None):
     return best_name, best
 
 
+def bottom_bar_ratio(glyph, frac=BOTTOM_BAR_FRAC):
+    """Доля колонок канона, занятых чернилами в нижних frac высоты глифа.
+
+    У двойки низ — горизонтальная черта во всю ширину, у семёрки там только
+    хвост диагонали. На живых эталонах: rank_2 = 0.61, rank_7 = 0.29.
+    """
+    if glyph is None or glyph.size == 0:
+        return 0.0
+    ink = glyph > 127
+    h = ink.shape[0]
+    k = max(1, int(round(h * frac)))
+    return float(ink[h - k:].any(axis=0).mean())
+
+
+def resolve_2_vs_7(glyph, s2, s7, tpl_2=None, tpl_7=None):
+    """Развести 2 и 7 по нижней черте глифа. Возвращает (ранг, скор).
+
+    Корреляция их путает: мои карты лежат веером, у наклонённой семёрки
+    диагональ уходит влево так же, как у двойки, и скор двойки выходит даже
+    выше (на живых кадрах 0.49-0.56 против 0.28-0.41 у настоящего эталона 7).
+    Отличает их низ глифа — см. bottom_bar_ratio.
+
+    Порог берётся не константой, а серединой между эталонами: шрифт эталонов
+    может быть любым (в тестах глифы рисуются другим шрифтом, и абсолютный
+    порог, подобранный под ClubGG, ломал бы распознавание семёрок). Вокруг
+    середины оставлена мёртвая зона BOTTOM_BAR_MARGIN, а слишком похожие
+    эталоны (разница меньше BOTTOM_BAR_MIN_GAP) признаком не разводятся вовсе.
+
+    Скор возвращается лучший из двух: когда признак спорит с корреляцией,
+    корреляция у наклонённого глифа врёт, и её значение говорит лишь «глиф
+    похож на цифру этой пары» — иначе верно опознанная карта отсеклась бы
+    порогом MIN_SCORE.
+    """
+    pick, best = ('2', s2) if s2 >= s7 else ('7', s7)
+    if tpl_2 is None or tpl_7 is None:
+        return pick, best
+    b2, b7 = bottom_bar_ratio(tpl_2), bottom_bar_ratio(tpl_7)
+    if b2 - b7 < BOTTOM_BAR_MIN_GAP:
+        return pick, best
+    mid = (b2 + b7) / 2
+    bar = bottom_bar_ratio(glyph)
+    if bar < mid - BOTTOM_BAR_MARGIN:
+        pick = '7'
+    elif bar > mid + BOTTOM_BAR_MARGIN:
+        pick = '2'
+    return pick, max(s2, s7)
+
+
 def _ink_bbox(img):
     """Бокс непустых пикселей (x, y, w, h) или None."""
     ys, xs = np.nonzero(img)
@@ -438,10 +491,19 @@ def recognize_corner(corner, ranks, suits):
     # «10» — единственный ранг из двух глифов; эталон T сравнивается как обычный,
     # а широкий бокс — запасной путь, если эталона T нет (живой шрифт компактный,
     # wide=0.7, поэтому без эталона десятка не читалась вовсе)
+    bar = None
     if g['rank_parts'] >= 2 and g['rank_wide'] >= T_WIDTH:
         rank, r_score = 'T', 1.0
     else:
         rank, r_score = match_best(g['rank_img'], ranks)
+        # 2 и 7 корреляция путает — разводим их структурным признаком
+        if rank in ('2', '7') and '2' in ranks and '7' in ranks:
+            other = '7' if rank == '2' else '2'
+            _, o_score = match_best(g['rank_img'], ranks, allowed={other})
+            s2, s7 = (r_score, o_score) if rank == '2' else (o_score, r_score)
+            rank, r_score = resolve_2_vs_7(g['rank_img'], s2, s7,
+                                           ranks['2'], ranks['7'])
+            bar = round(bottom_bar_ratio(g['rank_img']), 3)
 
     if rank is None:
         return None, 0.0, {'reason': 'no rank templates', 'color': color}
@@ -449,6 +511,8 @@ def recognize_corner(corner, ranks, suits):
     score = min(r_score, s_score) if suits else r_score
     info = {'rank_score': round(r_score, 3), 'suit_score': round(s_score, 3),
             'color': color, 'rank_parts': g['rank_parts']}
+    if bar is not None:
+        info['bottom_bar'] = bar
     if r_score < MIN_SCORE:
         return None, score, {**info, 'reason': 'low rank score'}
     return f'{rank}{suit}', score, info

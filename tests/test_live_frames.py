@@ -22,6 +22,7 @@ import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config                           # noqa: E402
+import card_reader                      # noqa: E402
 import table_state as ts                # noqa: E402
 from build_templates import digit_labels  # noqa: E402
 
@@ -79,6 +80,52 @@ POTS = {
     '20260818_154915_check.png': 2.0,
     '20260818_154925_raise.png': 2.0,
 }
+
+
+# кадр из shots_digits/ -> ранги моих карт, прочитанные ГЛАЗАМИ с оригинала.
+# Здесь собраны все кадры сессии 18.08, где у героя есть 2 или 7: до фикса
+# resolve_2_vs_7 восемь семёрок (все на ПРАВОЙ карте, она лежит в веере с
+# наклоном) читались двойками. Масти не проверяем — у карт этой сессии
+# встречается отдельная путаница d/h и c/s, к рангам она отношения не имеет.
+HOLE_RANKS = {
+    '20260818_125126_fold.jpg': 'J7',
+    '20260818_125251_fold.jpg': '42',
+    '20260818_125321_fold.jpg': '75',
+    '20260818_125505_fold.jpg': 'A7',
+    '20260818_125616_fold.jpg': 'J7',
+    '20260818_133152_fold_badcards.jpg': 'T7',
+    '20260818_133623_fold.jpg': '87',
+    '20260818_133825_fold.jpg': '62',
+    '20260818_134539_fold.jpg': '75',
+    '20260818_134610_fold.jpg': '52',
+    '20260818_135003_fold.jpg': 'Q7',
+    '20260818_135440_fold.jpg': '82',
+    '20260818_135546_fold.jpg': '62',
+    '20260818_135637_fold.jpg': '76',
+    '20260818_135658_call.jpg': 'A7',
+    '20260818_135743_fold.jpg': '72',
+    '20260818_135801_fold.jpg': 'Q7',
+}
+
+DIGIT_SHOTS = os.path.join(BASE, 'shots_digits')
+
+
+@unittest.skipUnless(os.path.isdir(DIGIT_SHOTS), 'нет папки shots_digits/ с живыми кадрами')
+class LiveRanksTest(unittest.TestCase):
+    """Ранги моих карт на живых кадрах: регрессия на путаницу 2 и 7."""
+
+    def test_two_and_seven_not_confused(self):
+        bad = []
+        for name, want in HOLE_RANKS.items():
+            path = os.path.join(DIGIT_SHOTS, name)
+            if not os.path.exists(path):
+                continue
+            img = cv2.imread(path)
+            self.assertIsNotNone(img, path)
+            got = ''.join((c or '?')[0] for c in card_reader.read_table(img)['hole'])
+            if got != want:
+                bad.append(f'{name}: {want} -> {got}')
+        self.assertEqual(bad, [], f'неверно прочитаны ранги на {len(bad)} кадрах')
 
 
 class DigitLabelsTest(unittest.TestCase):

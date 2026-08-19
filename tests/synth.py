@@ -13,6 +13,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
+import card_reader  # noqa: E402
 import table_state as ts  # noqa: E402
 
 FELT = (60, 105, 45)          # BGR тёмно-зелёное сукно
@@ -101,6 +102,30 @@ def draw_card(img, x, y, w, h, card, index_rect=None, center_picture=True):
     # центральный рисунок (крупный значок масти) — не должен мешать распознаванию угла
     if center_picture:
         draw_suit(img, x + w // 2, y + int(h * 0.68), int(h * 0.15), suit, color)
+
+
+def rank_glyph(rank, slant=0.0, size=160):
+    """Нормализованный глиф ранга — такой, каким его отдаёт extract_glyphs.
+
+    slant — наклон глифа: низ уезжает влево относительно верха. Мои карты лежат
+    веером под углом, и у наклонённой СЕМЁРКИ диагональ уходит влево так же, как
+    у двойки: корреляция начинает выбирать «2» (живые кадры 18.08 — 8 семёрок из
+    13 прочитались двойками). Разводит их только нижняя черта двойки, см.
+    card_reader.resolve_2_vs_7 — этот рендер и даёт тестам такой спорный глиф.
+    """
+    text = '10' if rank == 'T' else rank
+    scale = size / 145.0 * 1.3
+    thick = max(2, int(3 * size / 145.0))
+    (_, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, scale, thick)
+    pad = int(size * 0.6)
+    img = np.zeros((size + 2 * pad, size + 2 * pad), np.uint8)
+    cv2.putText(img, text, (pad, pad + th), cv2.FONT_HERSHEY_DUPLEX, scale, 255, thick)
+    if slant:
+        cy = pad + th / 2.0
+        m = np.float32([[1, -slant, slant * cy], [0, 1, 0]])
+        img = cv2.warpAffine(img, m, img.shape[::-1], flags=cv2.INTER_NEAREST)
+    bbox = card_reader._ink_bbox(img)
+    return card_reader._norm_glyph(img, bbox, card_reader.CANON_RANK)
 
 
 def draw_amount(img, center, text, height, color=YELLOW):
