@@ -7,7 +7,9 @@
 
 Префлоп: диапазоны стартовых рук по позициям (стиль ТАГ из strategy.md),
 плюс формула Чена как запасная оценка, когда позиция не определена.
-Постфлоп: категория руки (hand_evaluator.hand_class) + пот-оддсы и ауты.
+Постфлоп: категория руки (hand_evaluator.hand_class) + пот-оддсы и ауты. Дро
+считается по одной карте (за вторую на следующей улице придётся заплатить
+снова), а неявные пот-оддсы — доборные ставки — учитываются в цене колла.
 
 Записи диапазонов: 'AA', 'AKs', 'AKo', '22+', 'ATs+', 'A5o+', '76s+'.
 Знак '+' у коннекторов (разрыв 1) поднимает обе карты (76s+ = 76s,87s,...,KQs),
@@ -75,6 +77,7 @@ PREMIUM = 'JJ+, AQs+, AKo'
 OPEN_SIZE_BB = 2.5          # открытие рейзом
 THREE_BET_MULT = 3.0        # 3-бет = 3x предыдущего рейза
 CBET_POT = 0.6              # ставка на велью, доля банка
+NUTS_POT = 0.75             # с натсами берём дороже: заряжаем дро и вторую руку
 SEMI_BLUFF_POT = 0.45       # полу-блеф с дро
 
 # Настройки розыгрыша (их переопределяет секция "postflop" чарта).
@@ -82,6 +85,7 @@ DEFAULT_SETTINGS = {
     'open_size_bb': OPEN_SIZE_BB,
     'three_bet_mult': THREE_BET_MULT,
     'cbet_pot': CBET_POT,
+    'nuts_pot': NUTS_POT,
     'semi_bluff_pot': SEMI_BLUFF_POT,
     'aggression': 1.0,          # общий множитель размеров ставок
     'medium_max_price': 0.40,   # дороже — средняя рука пасует
@@ -89,6 +93,9 @@ DEFAULT_SETTINGS = {
     'cheap_price': 0.12,        # цена, за которую смотрим следующую карту с чем угодно
     'max_call_stack_frac': 0.20,  # префлоп-колл дороже доли стека — только с премиумом
     'preflop_max_price': 0.45,  # префлоп: цена колла в долях банка
+    'big_bet_price': 0.25,      # префлоп: цена, при которой крупную ставку коллят и без премиума
+    'implied_pot_mult': 1.0,    # сколько банков доберём на следующей улице, когда дро зайдёт
+    'all_in_frac': 0.50,        # колл дороже доли стека = алл-ин: ставок больше не будет
 }
 
 # Примерное эквити готовой руки против крупной ставки/алл-ина — по классу силы.
@@ -342,6 +349,21 @@ def pot_odds(to_call_bb, pot_bb):
     return to_call_bb / total if total > 0 else None
 
 
+def implied_price(to_call_bb, pot_bb, stack_bb, mult):
+    """Цена колла с учётом неявных пот-оддсов — денег, которые доберём, когда дро зайдёт.
+
+    Обычные пот-оддсы сравнивают цену только с тем, что лежит в банке сейчас.
+    Дро же окупается будущими ставками: собрав флеш, мы выигрываем ещё примерно
+    банк. Добор ограничен остатком стека (больше него никто не доплатит).
+    """
+    if not to_call_bb or not pot_bb:
+        return None
+    extra = mult * pot_bb
+    if stack_bb:
+        extra = max(0.0, min(extra, stack_bb - to_call_bb))
+    return to_call_bb / (pot_bb + extra + to_call_bb)
+
+
 def _d(action, reason, amount=None, pot_frac=None):
     return {'action': action, 'amount_bb': amount, 'reason': reason, 'pot_frac': pot_frac}
 
@@ -425,8 +447,15 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
     versus = _versus(no_raise, to_call_bb, stack_bb) if (big or no_raise) else ''
     if in_range(hole, call_rng):
         if big and not premium:
+            # Цена решает и здесь: против алл-ина в раздутый банк рука из
+            # диапазона колла окупается и без премиума (25% банка — это 3:1,
+            # столько эквити есть у любой руки, которой мы вообще играем).
+            if price is not None and price < st['big_bet_price']:
+                return _d('call', f'{code}: колл {to_call_bb}ББ {versus} — пот-оддсы '
+                                  f'{price:.0%} ниже порога {st["big_bet_price"]:.0%}')
             return _d('fold', f'{code}: фолд {versus} — колл {to_call_bb}ББ больше '
-                              f'{cap:.0%} стека, без премиума')
+                              f'{cap:.0%} стека, без премиума'
+                      + (f' (пот-оддсы {price:.0%})' if price is not None else ''))
         # префлоп цена колла обычно 30-40% банка — это нормально (имплайд-оддсы),
         # отказываемся только от совсем безнадёжной цены
         if price is not None and price > st['preflop_max_price'] and not premium:
@@ -457,10 +486,14 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
     if cls['made_note']:
         name = f'{name} ({cls["made_note"]})'
     price = pot_odds(to_call_bb, pot_bb)
-    equity = he.equity_from_outs(outs, street)
     showdown = SHOWDOWN_EQUITY.get(made, 0.0)
+    # Колл размером с полстека и больше — фактически алл-ин: ставок дальше не
+    # будет, значит дро увидит ОБЕ карты (правило 4x) и добирать нечего.
+    all_in = bool(no_raise or (to_call_bb and stack_bb
+                               and to_call_bb >= st['all_in_frac'] * stack_bb))
     hu = players is not None and players <= 2
     cbet, semi = chart.size('cbet_pot'), chart.size('semi_bluff_pot')
+    nuts_size = chart.size('nuts_pot')
     # Флеш/стрит/фулл: рука сильная по номиналу, но её ранг уже учтён в made —
     # младшим флешем банк не растят, а против крупной ставки считают шансы.
     big_made = cls['category'] is not None and cls['category'] >= he.STRAIGHT
@@ -483,15 +516,27 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
             return _d('call', f'{name}: колл со средней рукой, {_odds_note(price, showdown)}')
         if made == 'draw' or draws:
             if price is None:
-                # чисел нет: считаем ставку полубанком (цена ~33%)
-                return (_d('call', f'дро {draws}, {outs} аутов (~{equity:.0%}) — колл по аутам')
-                        if equity >= st['draw_min_equity']
+                # чисел нет: считаем ставку полубанком и рассчитываем дойти до ривера
+                blind_eq = he.equity_from_outs(outs, street)
+                return (_d('call', f'дро {draws}, {outs} аутов (~{blind_eq:.0%}) — колл по аутам')
+                        if blind_eq >= st['draw_min_equity']
                         else _d('fold', f'дро {draws}: {outs} аутов мало'))
-            if equity > price:
-                return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > цены {price:.0%}')
+            # На флопе колл покупает ОДНУ карту, а не две: на терне за вторую
+            # придётся заплатить снова. Правило 4x тут завышало эквити почти
+            # вдвое (флеш-дро «36%» против цены 33% — на деле 19%). Недобор
+            # закрывают неявные пот-оддсы: когда дро заходит, оппонент доплачивает.
+            one_card = street == 'flop' and not all_in
+            equity = he.equity_from_outs(outs, 'turn' if one_card else street)
+            eff = price if all_in else implied_price(to_call_bb, pot_bb, stack_bb,
+                                                     st['implied_pot_mult'])
+            eff = price if eff is None else eff
+            note = '' if eff == price else f' (с имплайд-оддсами, чистая цена {price:.0%})'
+            if equity > eff:
+                return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > '
+                                  f'цены {eff:.0%}{note}')
             if street == 'flop' and 'flush' in draws and hu and not no_raise:
                 return _raise_pot(f'сильное дро {draws}: полу-блеф', pot_bb, semi)
-            return _d('fold', f'дро {draws}: {equity:.0%} < цены {price:.0%}')
+            return _d('fold', f'дро {draws}: {equity:.0%} < цены {eff:.0%}{note}')
         if price is not None and price < st['cheap_price'] and street != 'river':
             return _d('call', f'{name}: дёшево ({price:.0%}) — смотрим следующую карту')
         return _d('fold', f'{name}: нечем продолжать')
@@ -503,7 +548,9 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
         # младший флеш/стрит: ставкой мы соберём велью только от того, кто бьёт
         return _d('check', f'{name}: младшая рука — чек, идём на шоудаун')
     if made in ('nuts', 'strong'):
-        return _raise_pot(f'{name}: ставка на велью', pot_bb, cbet)
+        # с непобиваемой рукой ставим крупнее: пресет 75% банка вместо 50%
+        return _raise_pot(f'{name}: ставка на велью', pot_bb,
+                          nuts_size if made == 'nuts' else cbet)
     if made == 'medium':
         if street == 'flop':
             return _raise_pot(f'{name}: конт-бет', pot_bb, cbet * 0.8)

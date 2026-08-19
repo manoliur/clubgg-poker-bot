@@ -578,6 +578,7 @@ def main(argv=None):
         st['medium_max_price'] = round(st['medium_max_price'] * args.defense, 3)
         st['preflop_max_price'] = round(st['preflop_max_price'] * args.defense, 3)
         st['cheap_price'] = round(st['cheap_price'] * args.defense, 3)
+        st['big_bet_price'] = round(st['big_bet_price'] * args.defense, 3)
         st['max_call_stack_frac'] = round(st['max_call_stack_frac'] * args.defense, 3)
         st['draw_min_equity'] = round(st['draw_min_equity'] / args.defense, 3)
         print(f'настройки: агрессия x{args.aggression}, защита x{args.defense}')

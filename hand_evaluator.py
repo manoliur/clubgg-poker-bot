@@ -161,30 +161,54 @@ def compare(hand_a, hand_b):
 # --------------------------------------------------------------------------
 # дро и аутсы — нужны стратегии на флопе/тёрне
 # --------------------------------------------------------------------------
-def flush_draw(cards):
-    """4 карты одной масти (без готового флеша) -> масть, иначе None."""
+def flush_draw(cards, hole=None):
+    """4 карты одной масти (без готового флеша) -> масть, иначе None.
+
+    hole — наши карманные карты. Если они заданы, дро засчитывается только с
+    нашей картой этой масти: четыре пики на доске без пики в руке — это дро
+    оппонента, мы с него ничего не получаем (нам такая карта банк не выигрывает).
+    """
     parsed = parse_cards(cards)
+    ours = {s for _, s in parse_cards(hole)} if hole is not None else None
     by_suit = {}
     for v, s in parsed:
         by_suit.setdefault(s, []).append(v)
     for s, vs in by_suit.items():
-        if len(vs) == 4:
+        if len(vs) == 4 and (ours is None or s in ours):
             return s
     return None
 
 
-def straight_draw(cards):
-    """'open' (двусторонний, 8 аутов), 'gutshot' (4 аута) или None."""
-    parsed = parse_cards(cards)
-    values = {v for v, _ in parsed}
+def _straight_outs(values, board_values=None):
+    """Ранги, закрывающие стрит. Пустое множество, если стрит уже собран.
+
+    board_values — значения доски: карта, которая даёт стрит одной доске, есть
+    у всех за столом, нашим аутом она не считается (доска 5-6-7-8 и наши A-2:
+    девятка «закрывает стрит», но он общий).
+    """
+    values = set(values)
     if _straight_high(values):
-        return None
+        return set()
     outs = set()
     for card in range(2, 15):
         if card in values:
             continue
-        if _straight_high(values | {card}):
-            outs.add(card)
+        ours = _straight_high(values | {card})
+        if not ours:
+            continue
+        if board_values is not None:
+            theirs = _straight_high(set(board_values) | {card})
+            if theirs and theirs >= ours:
+                continue
+        outs.add(card)
+    return outs
+
+
+def straight_draw(cards, board=None):
+    """'open' (двусторонний, 8 аутов), 'gutshot' (4 аута) или None."""
+    values = {v for v, _ in parse_cards(cards)}
+    bvals = {v for v, _ in parse_cards(board)} if board is not None else None
+    outs = _straight_outs(values, bvals)
     if len(outs) >= 2:
         return 'open'
     if len(outs) == 1:
@@ -193,21 +217,27 @@ def straight_draw(cards):
 
 
 def count_outs(hole, board):
-    """Грубая оценка аутов на улучшение (флеш-дро 9, стрит-дро 8/4, пара->сет 2)."""
-    cards = list(hole) + list(board)
+    """Ауты на улучшение: сколько карт КОЛОДЫ даёт нам флеш или стрит.
+
+    Считаются сами карты, а не «9 за флеш-дро + 8 за стрит-дро»: у комбо-дро
+    часть карт закрывает и то, и другое (флеш-дро + двусторонний — 15 аутов, а
+    не 17), а часть уже лежит на столе. Карманной паре добавляем 2 аута на сет.
+    """
+    hp, bp = parse_cards(hole), parse_cards(board)
+    known = set(hp + bp)
+    values = {v for v, _ in known}
+    board_vals = {v for v, _ in bp}
+    suit = flush_draw(list(hole) + list(board), hole=hole)
+    straight = _straight_outs(values, board_vals if bp else None)
     outs = 0
-    if flush_draw(cards):
-        outs += 9
-    sd = straight_draw(cards)
-    if sd == 'open':
-        outs += 8
-    elif sd == 'gutshot':
-        outs += 4
-    parsed = parse_cards(hole)
-    if len(parsed) == 2 and parsed[0][0] == parsed[1][0]:
-        board_vals = {v for v, _ in parse_cards(board)}
-        if parsed[0][0] not in board_vals:
-            outs += 2                       # карманная пара -> сет
+    for v in range(2, 15):
+        for s in SUITS:
+            if (v, s) in known:
+                continue
+            if (suit is not None and s == suit) or v in straight:
+                outs += 1
+    if len(hp) == 2 and hp[0][0] == hp[1][0] and hp[0][0] not in board_vals:
+        outs += 2                           # карманная пара -> сет
     return outs
 
 
@@ -292,6 +322,28 @@ def _straight_grade(board, high):
     return 'medium', f'младший стрит до {VALUE_RANK[high]}'
 
 
+def _two_pair_grade(hole, board, score):
+    """Две пары -> сила. Пара доски есть у всех, значит своя пара у нас одна.
+
+    Доска K K 5 и наши A5: «две пары KK55» — на деле пятёрка с тузом, любой
+    король бьёт нас трипсом. Настоящие две пары — только когда обе собраны
+    нашими картами, либо карманная пара выше пары доски.
+    """
+    bv = [v for v, _ in parse_cards(board)]
+    hv = sorted((v for v, _ in parse_cards(hole)), reverse=True)
+    board_pairs = {v for v in set(bv) if bv.count(v) >= 2}
+    if not board_pairs:
+        return 'strong', ''
+    top_board = max(board_pairs)
+    ours = [v for v in (score[1], score[2]) if v not in board_pairs]
+    if not ours:
+        return 'weak', 'обе пары на доске — играем кикер'
+    pocket = len(hv) == 2 and hv[0] == hv[1]
+    if pocket and hv[0] in ours and hv[0] > top_board:
+        return 'strong', ''
+    return 'medium', f'пара {VALUE_RANK[top_board]} на доске — вторая пара общая'
+
+
 def _full_house_grade(board, score):
     """Фулл-хаус: strong, но medium, если на доске пара старше нашей тройки."""
     bv = [v for v, _ in parse_cards(board)]
@@ -332,9 +384,9 @@ def hand_class(hole, board):
     result['category'] = score[0] if score else None
     result['name'] = describe(score) if score else None
 
-    if flush_draw(cards):
+    if flush_draw(cards, hole=hole):
         result['draws'].append('flush')
-    sd = straight_draw(cards)
+    sd = straight_draw(cards, board=board)
     if sd:
         result['draws'].append(sd)
     result['outs'] = count_outs(hole, board)
@@ -370,9 +422,15 @@ def hand_class(hole, board):
     elif cat >= TRIPS:
         result['made'] = 'strong'
     elif cat == TWO_PAIR:
-        result['made'] = 'strong'
+        result['made'], result['made_note'] = _two_pair_grade(hole, board, score)
     elif cat == PAIR and result['pair_type'] in ('overpair', 'top', 'set'):
         result['made'] = 'medium'
+    elif (cat == PAIR and result['pair_type'] == 'underpair'
+          and sum(1 for v in set(bv) if v > hv[0]) == 1):
+        # карманная пара под одной картой доски (QQ на K-7-2) — это вторая пара
+        # с лучшим кикером, одну ставку она выдерживает, «weak» было слишком тайтово
+        result['made'] = 'medium'
+        result['made_note'] = f'пара {VALUE_RANK[hv[0]]} под одной картой доски'
     elif cat == PAIR:
         result['made'] = 'weak'
     elif result['draws']:
@@ -387,6 +445,15 @@ def hand_class(hole, board):
         if threat:
             result['made'] = _DOWNGRADE.get(result['made'], result['made'])
             note = f'на доске 4 карты масти {threat} — возможен флеш'
+            result['made_note'] = f'{result["made_note"]}, {note}'.lstrip(', ')
+
+    # Играем доску: на ривере наши карты ничего не добавляют, лучшее — сплит.
+    # Растить банк такой рукой нельзя, а коллить — только если доска непобиваема
+    # (её натсовость уже оценили _flush_grade/_straight_grade выше).
+    if len(board) == 5 and score is not None and result['made'] != 'nuts':
+        if evaluate(board) == score:
+            result['made'] = 'weak'
+            note = 'играем доску — в лучшем случае сплит'
             result['made_note'] = f'{result["made_note"]}, {note}'.lstrip(', ')
     return result
 

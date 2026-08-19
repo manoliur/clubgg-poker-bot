@@ -317,6 +317,113 @@ class PotOddsTest(unittest.TestCase):
         self.assertNotEqual(d['action'], 'raise', d['reason'])
 
 
+class DrawPriceTest(unittest.TestCase):
+    """Дро платит за ОДНУ карту, если после колла ставки продолжатся.
+
+    Правило 4x («аутов x4») верно только когда денег больше не будет: на флопе
+    против обычной ставки мы покупаем один тёрн, а за ривер придётся платить
+    заново. Недобор компенсируют неявные пот-оддсы — добор на следующей улице.
+    """
+
+    FLUSH_DRAW = {'hole': ['As', '5s'], 'board': ['Ks', '9s', '2c'], 'street': 'flop',
+                  'has_bet': True, 'players': 6}       # 6-max: полу-блеф не мешает
+
+    def test_flop_draw_counts_one_card_against_a_normal_bet(self):
+        # цена 33% банка: по правилу 4x «36%» звало коллить, по факту у нас 18%
+        d = st.decide(state(**dict(self.FLUSH_DRAW, to_call_bb=10.0, pot_bb=20.0)),
+                      stack_bb=100.0)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('18%', d['reason'])
+
+    def test_all_in_draw_counts_both_cards(self):
+        """Та же цена, но колл — половина стека: карты будут обе, считаем 4x."""
+        d = st.decide(state(**dict(self.FLUSH_DRAW, to_call_bb=10.0, pot_bb=20.0)),
+                      stack_bb=20.0)
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertIn('36%', d['reason'])
+
+    def test_implied_odds_justify_a_cheap_call(self):
+        """Дешёвая ставка: чистая цена 25% выше эквити, но добор её окупает."""
+        d = st.decide(state(**dict(self.FLUSH_DRAW, to_call_bb=2.0, pot_bb=6.0)),
+                      stack_bb=100.0)
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertIn('имплайд', d['reason'])
+
+    def test_no_implied_odds_against_an_all_in(self):
+        """Против алл-ина добирать не с кого — считаем чистую цену."""
+        cheap = state(**dict(self.FLUSH_DRAW, to_call_bb=2.0, pot_bb=6.0, no_raise=True))
+        d = st.decide(cheap, stack_bb=100.0)
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertNotIn('имплайд', d['reason'])
+
+    def test_implied_price_capped_by_the_stack(self):
+        self.assertAlmostEqual(st.implied_price(2.0, 6.0, 100.0, 1.0), 2.0 / 14.0)
+        # в стеке осталось всего 3ББ — больше 3 мы не доберём
+        self.assertAlmostEqual(st.implied_price(2.0, 6.0, 5.0, 1.0), 2.0 / 11.0)
+        self.assertIsNone(st.implied_price(None, 6.0, 100.0, 1.0))
+
+    def test_board_draw_is_not_paid_for(self):
+        """4 карты масти на доске без нашей масти: коллить «по аутам» нечего.
+
+        Цена 13% — по фальшивым 9 аутам флеша это был колл, хотя пика не даёт
+        нам ничего (она даёт флеш оппоненту).
+        """
+        d = st.decide(state(hole=['6c', '6d'], board=['2s', '8s', 'Qs', '4s'],
+                            street='turn', has_bet=True, to_call_bb=3.0, pot_bb=20.0,
+                            players=2))
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertNotIn('дро', d['reason'])
+
+
+class BigPreflopBetTest(unittest.TestCase):
+    """Крупная ставка на префлопе: решает не только премиум, но и цена."""
+
+    STACK = 69.6
+
+    def hand(self, hole, to_call_bb, pot_bb):
+        return st.decide(state(hole=hole, position='BTN', players=6, players_seated=6,
+                               has_bet=True, to_call_bb=to_call_bb, pot_bb=pot_bb),
+                         stack_bb=self.STACK)
+
+    def test_good_price_calls_without_a_premium(self):
+        """Алл-ин 20ББ в банк 100ББ — цена 17%, столько эквити есть у TT."""
+        d = self.hand(['Th', 'Td'], 20.0, 100.0)
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertIn('пот-оддсы', d['reason'])
+
+    def test_bad_price_still_folds(self):
+        d = self.hand(['Th', 'Td'], 20.0, 20.0)          # цена 50%
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('пот-оддсы 50%', d['reason'])
+
+    def test_price_does_not_open_the_door_to_trash(self):
+        """Цена хорошая, но рука вне диапазона колла — всё равно фолд."""
+        d = self.hand(['7h', '2c'], 20.0, 100.0)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+
+
+class BetSizeTest(unittest.TestCase):
+    def test_nuts_bet_bigger_than_a_strong_hand(self):
+        nuts = st.decide(state(hole=['As', 'Ks'], board=['Qs', '9s', '2s'], street='flop',
+                               has_bet=False, pot_bb=10.0, players=2))
+        strong = st.decide(state(hole=['9h', '9c'], board=['9d', '5s', '2c'], street='flop',
+                                 has_bet=False, pot_bb=10.0, players=2))
+        self.assertEqual(nuts['action'], 'raise')
+        self.assertGreater(nuts['pot_frac'], strong['pot_frac'])
+        self.assertAlmostEqual(nuts['pot_frac'], 0.75)
+
+    def test_sizes_are_pot_fractions_not_min_bets(self):
+        """У каждой ставки есть доля банка — по ней бот выбирает пресет."""
+        for kw in ({'hole': ['9h', '9c'], 'board': ['9d', '5s', '2c']},        # сет
+                   {'hole': ['Ah', 'Jc'], 'board': ['Ad', '9s', '2c']},        # топ-пара
+                   {'hole': ['Ah', '5h'], 'board': ['Kh', '9h', '2c']}):       # дро
+            d = st.decide(state(street='flop', has_bet=False, pot_bb=10.0, players=2, **kw))
+            with self.subTest(**kw):
+                self.assertEqual(d['action'], 'raise', d['reason'])
+                self.assertIsNotNone(d['pot_frac'])
+                self.assertAlmostEqual(d['amount_bb'], round(10.0 * d['pot_frac'], 1))
+
+
 class RobustnessTest(unittest.TestCase):
     def test_unrecognized_cards_are_safe(self):
         d = st.decide(state(hole=[None, None], has_bet=True, to_call_bb=3.0))
@@ -346,6 +453,36 @@ class RobustnessTest(unittest.TestCase):
     def test_garbage_card_string(self):
         d = st.decide(state(hole=['Xx', 'Kd'], has_bet=True, to_call_bb=2.0))
         self.assertEqual(d['action'], 'fold')
+
+    def test_random_states_never_crash_and_keep_the_rules(self):
+        """Случайные раздачи: решение всегда есть и всегда законно.
+
+        Чек невозможен против ставки, колл/фолд — без ставки; любые None в
+        числах банка допустимы.
+        """
+        import random
+        import hand_evaluator as he
+        deck = [f'{r}{s}' for r in he.RANKS for s in he.SUITS]
+        rnd = random.Random(7)
+        for _ in range(2000):
+            cards = rnd.sample(deck, 7)
+            n = rnd.choice([0, 3, 4, 5])
+            has_bet = rnd.random() < 0.6
+            s = state(hole=cards[:2], board=cards[2:2 + n],
+                      street={0: 'preflop', 3: 'flop', 4: 'turn', 5: 'river'}[n],
+                      has_bet=has_bet,
+                      to_call_bb=rnd.choice([None, 0.5, 2.0, 10.0, 35.0]) if has_bet else None,
+                      pot_bb=rnd.choice([None, 1.5, 6.0, 20.0, 60.0]),
+                      position=rnd.choice([None, 'UTG', 'MP', 'CO', 'BTN', 'SB', 'BB']),
+                      players=rnd.choice([2, 3, 6]),
+                      players_seated=rnd.choice([2, 3, 6]),
+                      no_raise=rnd.random() < 0.2)
+            d = st.decide(s, stack_bb=rnd.choice([10.0, 69.6, 200.0]))
+            self.assertIn(d['action'], ('fold', 'check', 'call', 'raise'), s)
+            if has_bet:
+                self.assertNotEqual(d['action'], 'check', s)
+            else:
+                self.assertIn(d['action'], ('check', 'raise'), s)
 
     def test_loose_opponent_kills_bluff(self):
         base = state(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], street='flop',

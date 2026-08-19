@@ -153,6 +153,29 @@ class DrawTest(unittest.TestCase):
         self.assertEqual(count_outs(['9h', '8c'], ['7d', '6s', '2c']), 8)
         self.assertEqual(count_outs(['7h', '7c'], ['Ad', 'Ks', '2c']), 2)
 
+    def test_combo_draw_outs_are_not_double_counted(self):
+        """Флеш-дро + двусторонний = 15 аутов, а не 9+8: две карты общие."""
+        self.assertEqual(count_outs(['Jh', 'Th'], ['9h', '8c', '2h']), 15)
+        # флеш-дро + гатшот: одна общая карта -> 9 + 3
+        self.assertEqual(count_outs(['Ah', 'Kh'], ['Qh', 'Jc', '2h']), 12)
+
+    def test_flush_draw_on_the_board_is_not_ours(self):
+        """4 карты масти на доске, а в руке этой масти нет — дро чужое."""
+        board = ['2s', '8s', 'Qs', '4s']
+        self.assertIsNone(flush_draw(['6c', '6d'] + board, hole=['6c', '6d']))
+        self.assertEqual(flush_draw(['6s', '6d'] + board[:3], hole=['6s', '6d']), 's')
+        self.assertEqual(hand_class(['6c', '6d'], board)['draws'], [])
+        self.assertEqual(count_outs(['6c', '6d'], board), 2, 'остаётся только сет')
+
+    def test_straight_draw_on_the_board_is_not_ours(self):
+        """Доска 5-6-7-8: девятку/четвёрку получают все, это не наши ауты."""
+        board = ['5h', '6s', '7c', '8d']
+        self.assertIsNone(straight_draw(['Ac', '2d'] + board, board=board))
+        self.assertEqual(count_outs(['Ac', '2d'], board), 0)
+        # а вот свои карты в стрите — настоящее дро
+        self.assertEqual(straight_draw(['8d', '7h', '5h', '6s', '2c'],
+                                       board=['5h', '6s', '2c']), 'open')
+
 
 class HandClassTest(unittest.TestCase):
     def test_overpair(self):
@@ -254,6 +277,44 @@ class MadeHandRankTest(unittest.TestCase):
                          'strong')
         low = hand_class(['2h', '2d'], ['2s', 'Ks', 'Kh', '7c', '4c'])
         self.assertEqual(low['made'], 'medium', low['made_note'])
+
+    def test_two_pair_with_the_board_pair_is_not_strong(self):
+        """Доска K K 5 и наши A5: «две пары» есть у всех, у нас пятёрка с тузом."""
+        c = hand_class(['Ac', '5d'], ['Ks', 'Kd', '5c', '2h', '9s'])
+        self.assertEqual(c['made'], 'medium', c['made_note'])
+        self.assertIn('на доске', c['made_note'])
+        # обе пары на доске — мы играем один кикер
+        both = hand_class(['Ac', '7d'], ['Ks', 'Kd', '5c', '5h', '9s'])
+        self.assertEqual(both['made'], 'weak', both['made_note'])
+        # своя карманная пара выше пары доски — настоящие две пары
+        self.assertEqual(hand_class(['Ac', 'Ad'], ['9s', '9d', '4c'])['made'], 'strong')
+        # ...а ниже пары доски — нет: любой король бьёт нас трипсом
+        self.assertEqual(hand_class(['9c', '9d'], ['Ks', 'Kd', '4c'])['made'], 'medium')
+        # доска без пары — две пары остаются сильной рукой
+        self.assertEqual(hand_class(['Ah', 'Kc'], ['Ad', 'Kd', '2c'])['made'], 'strong')
+
+    def test_underpair_with_one_overcard_is_medium(self):
+        """QQ на K-7-2 — вторая пара с лучшим кикером, одну ставку она держит."""
+        c = hand_class(['Qc', 'Qd'], ['Ks', '7d', '2c'])
+        self.assertEqual(c['pair_type'], 'underpair')
+        self.assertEqual(c['made'], 'medium', c['made_note'])
+        # две карты выше — уже слабо
+        self.assertEqual(hand_class(['Qc', 'Qd'], ['Ks', 'Ad', '2c'])['made'], 'weak')
+        self.assertEqual(hand_class(['5c', '5d'], ['Ks', 'Qd', '2c'])['made'], 'weak')
+
+    def test_playing_the_board_is_weak(self):
+        """Свои карты ничего не добавляют: лучшее, на что мы играем, — сплит."""
+        c = hand_class(['2c', '3d'], ['5h', '6s', '7c', '8d', '9h'])
+        self.assertEqual(c['name'], 'стрит до 9')
+        self.assertEqual(c['made'], 'weak', c['made_note'])
+        self.assertIn('доску', c['made_note'])
+        # непобиваемая доска — коллить с ней можно (сплит не проигрыш)
+        self.assertEqual(hand_class(['2c', '3d'], ['Th', 'Js', 'Qc', 'Kd', 'Ah'])['made'],
+                         'nuts')
+        # своя карта в комбинации — доску мы не играем, скидки за сплит нет
+        own = hand_class(['Tc', '3d'], ['5h', '6s', '7c', '8d', '9h'])
+        self.assertEqual(own['name'], 'стрит до T')
+        self.assertNotIn('доску', own['made_note'])
 
     def test_quads_and_straight_flush_stay_nuts(self):
         self.assertEqual(hand_class(['9h', '9d'], ['9s', '9c', 'Kh'])['made'], 'nuts')
