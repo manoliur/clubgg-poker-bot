@@ -353,7 +353,21 @@ def _raise_pot(reason, pot_bb, fraction):
 # --------------------------------------------------------------------------
 # префлоп
 # --------------------------------------------------------------------------
-def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb, chart=None):
+def _versus(no_raise, to_call_bb, stack_bb):
+    """Как назвать ставку, на которую отвечаем: алл-ин или просто крупная."""
+    if no_raise:
+        return 'против алл-ина'
+    part = f' ({to_call_bb / stack_bb:.0%} стека)' if to_call_bb and stack_bb else ''
+    return f'против крупной ставки {to_call_bb}ББ{part}'
+
+
+def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb, chart=None,
+                   no_raise=False):
+    """Решение на префлопе. no_raise — рейз недоступен (оппонент в алл-ине).
+
+    Когда рейзить нечем или ставка перед нами размером с полстека, чарты 3-бета
+    и 4-бета не применяются: вопрос уже не «повышать ли», а окупается ли колл.
+    """
     chart = chart or _ACTIVE
     st = chart.settings
     code = hand_code(hole)
@@ -366,39 +380,62 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
 
     if not has_bet:
         # никто не поставил: открываемся рейзом или чекаем (мы в ББ)
+        if no_raise:
+            return _d('check', f'{code}: ставить нечем (живого пресета нет) — чек')
         if in_range(hole, open_rng):
             return _d('raise', f'{code}: открытие с {position or "?"} '
                                f'(диапазон {"HU" if hu else "6-max"}, {chart.name})', open_size)
         return _d('check', f'{code}: вне диапазона открытия, но чек бесплатный')
 
     # перед нами ставка
-    if in_range(hole, chart.four_bet):
-        return _d('raise', f'{code}: премиум — 4-бет/олл-ин',
-                  max(open_size * 3, (to_call_bb or open_size) * mult))
-    if in_range(hole, value3bet):
-        return _d('raise', f'{code}: 3-бет на велью', (to_call_bb or open_size) * mult)
-
+    cap = st['max_call_stack_frac']
+    premium = in_range(hole, chart.premium)
     price = pot_odds(to_call_bb, pot_bb)
+    # Ставка больше cap стека — это уже алл-ин или 4-бет: поднимать её «на велью»
+    # по чарту нельзя. Живая раздача 19.08 09:52: 76s ответила 3-бетом на
+    # алл-ин, рейзить было нечем, и тап выродился в колл 23.7ББ (34% стека).
+    big = to_call_bb is not None and stack_bb and to_call_bb > cap * stack_bb
+    if not no_raise and not (big and not premium):
+        if in_range(hole, chart.four_bet):
+            return _d('raise', f'{code}: премиум — 4-бет/олл-ин',
+                      max(open_size * 3, (to_call_bb or open_size) * mult))
+        if in_range(hole, value3bet):
+            return _d('raise', f'{code}: 3-бет на велью', (to_call_bb or open_size) * mult)
+    else:
+        # Рейза не будет — руки, которыми мы бы повысили, уходят в колл: они
+        # сильнее тех, которыми мы просто уравниваем. Без этого AKo пасовал бы
+        # против алл-ина: в GTO-чарте диапазон колла на BTN — «77, 88, ATs»,
+        # всё остальное сильное лежит в 3-бете и 4-бете.
+        call_rng = (parse_range(call_rng) | parse_range(value3bet)
+                    | parse_range(chart.four_bet))
+
+    versus = _versus(no_raise, to_call_bb, stack_bb) if (big or no_raise) else ''
     if in_range(hole, call_rng):
-        cap = st['max_call_stack_frac']
-        if to_call_bb is not None and to_call_bb > cap * stack_bb \
-                and not in_range(hole, chart.premium):
-            return _d('fold', f'{code}: колл {to_call_bb}ББ — больше {cap:.0%} стека, '
-                              'без премиума')
+        if big and not premium:
+            return _d('fold', f'{code}: фолд {versus} — колл {to_call_bb}ББ больше '
+                              f'{cap:.0%} стека, без премиума')
         # префлоп цена колла обычно 30-40% банка — это нормально (имплайд-оддсы),
         # отказываемся только от совсем безнадёжной цены
-        if price is not None and price > st['preflop_max_price'] \
-                and not in_range(hole, chart.premium):
+        if price is not None and price > st['preflop_max_price'] and not premium:
             return _d('fold', f'{code}: цена {price:.0%} банка слишком высока')
+        if versus:
+            odds = f' по пот-оддсам {price:.0%}' if price is not None else ''
+            return _d('call', f'{code}: колл {to_call_bb}ББ {versus}{odds}')
         return _d('call', f'{code}: колл по диапазону {position or "?"}')
-    return _d('fold', f'{code}: вне диапазона на {position or "?"}')
+    return _d('fold', f'{code}: вне диапазона на {position or "?"}'
+              + (f' — фолд {versus}' if versus else ''))
 
 
 # --------------------------------------------------------------------------
 # постфлоп
 # --------------------------------------------------------------------------
 def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-                    chart=None):
+                    chart=None, no_raise=False):
+    """Решение после флопа. no_raise — рейз/ставка недоступны (живого пресета нет).
+
+    Тогда сильная рука коллит вместо рейза, а полу-блеф отменяется: блефовать
+    коллом нельзя, и решение остаётся за пот-оддсами.
+    """
     chart = chart or _ACTIVE
     st = chart.settings
     cls = he.hand_class(hole, board)
@@ -411,6 +448,10 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
 
     if has_bet:
         if made in ('nuts', 'strong'):
+            if no_raise:
+                price_txt = f' по пот-оддсам {price:.0%}' if price is not None else ''
+                return _d('call', f'{name}: колл против алл-ина{price_txt} '
+                                  '(рейз недоступен)')
             return _raise_pot(f'{name}: рейз на велью', pot_bb, cbet * 1.5)
         if made == 'medium':
             if price is not None and price > st['medium_max_price']:
@@ -424,7 +465,7 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
                         else _d('fold', f'дро {draws}: {outs} аутов мало'))
             if equity > price:
                 return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > цены {price:.0%}')
-            if street == 'flop' and 'flush' in draws and hu:
+            if street == 'flop' and 'flush' in draws and hu and not no_raise:
                 return _raise_pot(f'сильное дро {draws}: полу-блеф', pot_bb, semi)
             return _d('fold', f'дро {draws}: {equity:.0%} < цены {price:.0%}')
         if price is not None and price < st['cheap_price'] and street != 'river':
@@ -432,6 +473,8 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
         return _d('fold', f'{name}: нечем продолжать')
 
     # нам чекнули / мы первые
+    if no_raise:
+        return _d('check', f'{name}: ставить нечем (живого пресета нет) — чек')
     if made in ('nuts', 'strong'):
         return _raise_pot(f'{name}: ставка на велью', pot_bb, cbet)
     if made == 'medium':
@@ -476,6 +519,11 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
     Ожидает ключи state: hole, board, street, has_bet, to_call_bb, pot_bb,
     position, players. Неизвестные числа (None) допустимы. chart — загруженный
     набор правил (по умолчанию активный, см. use_chart).
+
+    state['no_raise'] — рейз в клиенте недоступен (оппонент в алл-ине, живых
+    пресетов ставки нет). Тогда решение принимается только между коллом и
+    фолдом: раньше главный цикл молча подменял несостоявшийся рейз коллом, и
+    76s «3-бет на велью» превращался в колл 23.7ББ против алл-ина (19.08 09:52).
     """
     chart = chart or _ACTIVE
     hole = [c for c in (state.get('hole') or []) if c]
@@ -495,14 +543,16 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
     seated = state.get('players_seated') or players      # сидят за столом (префлоп)
     position = state.get('position')
 
+    no_raise = bool(state.get('no_raise'))
+
     try:
         if street == 'preflop' or not board:
             decision = decide_preflop(hole, position, seated, has_bet, to_call, pot,
-                                      stack_bb, chart)
+                                      stack_bb, chart, no_raise=no_raise)
             made = 'preflop'
         else:
             decision = decide_postflop(hole, board, street, has_bet, to_call, pot,
-                                       stack_bb, players, chart)
+                                       stack_bb, players, chart, no_raise=no_raise)
             made = he.hand_class(hole, board)['made']
     except (he.BadCard, ValueError) as e:
         return _d('check' if not has_bet else 'fold', f'ошибка разбора карт: {e}')

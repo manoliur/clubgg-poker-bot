@@ -193,7 +193,7 @@ class Bot:
         """
         presets = state.get('raise_presets') or []
         live = [p for p in presets if p['enabled']]
-        if not live:
+        if not live:                         # см. can_raise
             return None
         best = live[0]                       # самый мелкий живой — как было раньше
         if pot_frac and not state['has_bet']:
@@ -205,6 +205,14 @@ class Bot:
             self.log(f'нижний пресет ставки погашен (мельче минимума) — '
                      f'жму пресет #{best["i"]} в ({best["x"]},{best["y"]})')
         return best['x'], best['y']
+
+    def can_raise(self, state):
+        """Можно ли вообще поднять: есть ли в столбце хоть один живой пресет.
+
+        Ровно то условие, при котором bet_point находит точку тапа, но без его
+        побочного лога — проверять доступность рейза надо до решения.
+        """
+        return any(p['enabled'] for p in (state.get('raise_presets') or []))
 
     def decide(self, state):
         return strategy.decide(state, profile=self.opponent_profile(),
@@ -269,9 +277,14 @@ class Bot:
         return state, img
 
     def resolve_tap(self, state, action, pot_frac=None):
-        """Действие -> (действие, точка). Рейз без живой кнопки бета заменяем
-        на колл/чек: тапать в пустоту или в погашенную кнопку хуже, чем сыграть
-        пассивно (такой тап не проходит и ход сгорает по таймауту)."""
+        """Действие -> (действие, точка).
+
+        Рейз без живой кнопки бета сюда доходить не должен: этот случай
+        разбирает step — переспрашивает стратегию с no_raise, и она решает
+        колл/фолд по пот-оддсам. Подмена ниже осталась последней страховкой:
+        тапать в пустоту или в погашенную кнопку хуже, чем сыграть пассивно
+        (такой тап не проходит и ход сгорает по таймауту).
+        """
         if action == 'raise':
             point = self.bet_point(state, pot_frac)
             if point is not None:
@@ -318,6 +331,15 @@ class Bot:
             if expanded is not state:
                 state = self.last_state = expanded
                 decision = self.decide(state)
+        # рейз некуда тапнуть (оппонент в алл-ине, живых пресетов нет): раньше
+        # он молча становился коллом, и «76s: 3-бет на велью» превращался в колл
+        # 23.7ББ против алл-ина (живая раздача 19.08 09:52). Теперь спрашиваем
+        # стратегию заново, зная, что рейз недоступен, — она решает колл/фолд.
+        if decision['action'] == 'raise' and not self.can_raise(state):
+            blocked = self.decide({**state, 'no_raise': True})
+            self.log(f"рейз недоступен ({decision['reason']}) -> "
+                     f"{blocked['action'].upper()}: {blocked['reason']}")
+            decision = blocked
         action, point = self.resolve_tap(state, decision['action'],
                                          decision.get('pot_frac'))
         reason = decision['reason']

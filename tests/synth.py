@@ -240,6 +240,9 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
            size=(config.REF_W, config.REF_H)):
     """Собрать кадр. hole/board — списки строк карт ('Ah'), None = рубашка.
 
+    call_amount — сумма на кнопке «Колл»: True даёт 2.5ББ, число — сколько
+    нужно (алл-ин оппонента в тестах — это 23.7ББ при банке 51.7).
+
     players — сколько игроков В РАЗДАЧЕ (включая героя), sitting_out — сколько
     ещё занятых мест без карт (сидят вне раздачи). dealer: 'me', 'opp' (первое
     место по кругу за героем), номер места оппонента или None.
@@ -317,7 +320,10 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
         for name, center in (('fold', config.BTN_FOLD), ('call', config.BTN_CALL),
                              ('raise', config.BTN_RAISE)):
             c = config.scale(center, W, H)
-            amount = '2.5' if name == 'call' and call_amount else None
+            amount = None
+            if name == 'call' and call_amount:
+                # call_amount=True — прежние 2.5ББ, числом — любая сумма колла
+                amount = '2.5' if call_amount is True else str(call_amount)
             if name == 'raise':
                 amount = '1.3'        # клиент всегда пишет размер на кнопке «Бет»
             draw_button(img, c, int(W * 0.30), int(H * 0.048), amount=amount,

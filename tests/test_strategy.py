@@ -176,6 +176,88 @@ class PostflopTest(unittest.TestCase):
             self.assertIn(d['action'], ('check', 'raise'), (hole, d))
 
 
+class AllInDefenceTest(unittest.TestCase):
+    """Живая раздача 19.08 09:52 #27: бот заколлил алл-ин 23.7ББ с 76s.
+
+    Стол 3-max (один вне раздачи), поз=BTN, чарт gto_6max — в нём 76s входит в
+    диапазон 3-бета (блеф-3-бет против открытия). На 4-бет-алл-ин оппонента
+    стратегия снова выдала «3-бет на велью», живого пресета рейза не было, и
+    главный цикл молча подменил рейз коллом 23.7ББ (34% стека).
+    """
+
+    CHART = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         'charts', 'gto_6max.json')
+    STACK = 69.6
+
+    def setUp(self):
+        self.chart = st.load_chart(self.CHART)
+
+    def hand(self, **kw):
+        base = {'hole': ['7d', '6d'], 'position': 'BTN', 'players': 2,
+                'players_seated': 3, 'has_bet': True, 'to_call_bb': 23.7,
+                'pot_bb': 51.7}
+        base.update(kw)
+        return st.decide(state(**base), stack_bb=self.STACK, chart=self.chart)
+
+    def test_three_bet_still_fires_against_a_normal_open(self):
+        """09:52:19 — открытие 0.5ББ: блеф-3-бет с 76s по чарту законен."""
+        d = self.hand(to_call_bb=0.5, pot_bb=1.5)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+
+    def test_suited_connector_folds_to_all_in(self):
+        """09:52:27 — 4-бет/алл-ин 23.7ББ: это уже колл/фолд, а не 3-бет."""
+        d = self.hand()
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('крупной ставки', d['reason'])
+        self.assertIn('стека', d['reason'])
+
+    def test_no_raise_flag_blocks_the_three_bet(self):
+        """Рейза в клиенте нет — чарт 3-бета не применяется даже к мелкой ставке."""
+        d = self.hand(to_call_bb=0.5, pot_bb=1.5, no_raise=True)
+        self.assertNotEqual(d['action'], 'raise')
+        self.assertIn('против алл-ина', d['reason'])
+
+    def test_premium_calls_the_all_in(self):
+        """AKo/JJ против алл-ина коллируют, а не пасуют.
+
+        В GTO-чарте диапазон колла на BTN — «77, 88, ATs»: всё сильное лежит в
+        3-бете и 4-бете. Без переноса этих рук в колл премиум пасовал бы.
+        """
+        for hole in (['Ah', 'Kd'], ['Jh', 'Jd'], ['Ah', 'Qh']):
+            with self.subTest(hole=hole):
+                d = self.hand(hole=hole, no_raise=True)
+                self.assertEqual(d['action'], 'call', d['reason'])
+                self.assertIn('пот-оддсам', d['reason'])
+
+    def test_trash_folds_to_all_in(self):
+        d = self.hand(hole=['7h', '2c'], no_raise=True)
+        self.assertEqual(d['action'], 'fold')
+        self.assertIn('против алл-ина', d['reason'])
+
+    def test_no_raise_postflop_calls_with_value_and_folds_the_bluff(self):
+        """Постфлоп: сет коллит вместо рейза, полу-блеф отменяется (блефовать нечем)."""
+        made = st.decide(state(hole=['9h', '9c'], board=['9d', '5s', '2c'], street='flop',
+                               has_bet=True, to_call_bb=3.0, pot_bb=6.0, players=2,
+                               no_raise=True))
+        self.assertEqual(made['action'], 'call', made['reason'])
+        self.assertIn('рейз недоступен', made['reason'])
+        # флеш-дро против дорогой ставки: с рейзом это полу-блеф, без него — фолд
+        draw = state(hole=['Ah', '5h'], board=['Kh', '9h', '2c'], street='flop',
+                     has_bet=True, to_call_bb=2.5, pot_bb=3.0, players=2)
+        self.assertEqual(st.decide(draw)['action'], 'raise')
+        self.assertEqual(st.decide({**draw, 'no_raise': True})['action'], 'fold')
+
+    def test_no_raise_without_bet_is_check(self):
+        for hole in (['Ah', 'Ad'], ['7h', '2c']):
+            with self.subTest(hole=hole):
+                pre = st.decide(state(hole=hole, has_bet=False, no_raise=True))
+                self.assertEqual(pre['action'], 'check', pre['reason'])
+                post = st.decide(state(hole=hole, board=['Ad', 'Kd', '2c'], street='flop',
+                                       has_bet=False, pot_bb=6.0, players=2,
+                                       no_raise=True))
+                self.assertEqual(post['action'], 'check', post['reason'])
+
+
 class RobustnessTest(unittest.TestCase):
     def test_unrecognized_cards_are_safe(self):
         d = st.decide(state(hole=[None, None], has_bet=True, to_call_bb=3.0))

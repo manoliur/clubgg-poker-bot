@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import card_reader                      # noqa: E402
 import config                           # noqa: E402
 import main as main_mod                 # noqa: E402
+import strategy                         # noqa: E402
 import table_state as ts                # noqa: E402
 from build_templates import collect     # noqa: E402
 from main import Bot                    # noqa: E402
@@ -65,12 +66,27 @@ class MainLoopTest(unittest.TestCase):
                                os.path.join(self.tmp, 'cli_history.jsonl')):
             yield
 
-    def make_bot(self, frames, dry_run=False):
+    def make_bot(self, frames, dry_run=False, **kw):
         screen = FakeScreen(frames)
-        bot = Bot(screen, dry_run=dry_run, tpl_dir=self.tpl,
+        kw.setdefault('tpl_dir', self.tpl)
+        bot = Bot(screen, dry_run=dry_run,
                   log_path=os.path.join(self.tmp, 'bot.log'),
-                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'), **kw)
         return bot, screen
+
+    def numeric_tpl(self):
+        """Эталоны с цифрами: тогда бот читает банк и сумму колла, как на живом столе.
+
+        В общий self.tpl цифры не кладём — половина тестов написана на состояние
+        БЕЗ чисел (эталонов цифр может не быть вовсе), и решения там другие.
+        """
+        out = os.path.join(self.tmp, 'templates_num')
+        if not os.path.isdir(out):
+            shutil.copytree(self.tpl, out)
+            for name in os.listdir(config.TEMPLATES_DIR):
+                if name.startswith('digit_'):
+                    shutil.copy(os.path.join(config.TEMPLATES_DIR, name), out)
+        return out
 
     def test_no_action_when_not_my_turn(self):
         bot, screen = self.make_bot([synth.render(hole=['Ah', 'Kd'], buttons=False)])
@@ -142,7 +158,11 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(ids, [1, 1, 2], 'новая раздача = новые карманные карты')
 
     def test_raise_without_bet_button_becomes_call(self):
-        """Кнопки бета не видно -> вместо рейза колл: тапать в пустоту нельзя."""
+        """Кнопки бета не видно -> вместо рейза колл: тапать в пустоту нельзя.
+
+        Решение принимает стратегия, а не главный цикл: сет коллит потому, что
+        это сильная рука, и в причине это видно (см. test_blocked_raise_*).
+        """
         frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
                              call_amount=True, dealer='me', players=2)
         H, W = frame.shape[:2]
@@ -152,7 +172,7 @@ class MainLoopTest(unittest.TestCase):
         entry = bot.step()
         self.assertEqual(entry['action'], 'call')
         self.assertIsNone(entry['amount_bb'], 'размер несостоявшегося рейза не логируем')
-        self.assertIn('raise', entry['reason'])
+        self.assertIn('рейз недоступен', entry['reason'])
         self.assertEqual(len(screen.taps), 1)
         self.assertLess(screen.taps[0][0], rx - int(W * 0.16))
 
@@ -184,6 +204,57 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(entry['action'], 'call')
         self.assertEqual(len(screen.taps), 1)
         self.assertLess(screen.taps[0][0], config.PRESET_X[0], 'тап по коллу, не по столбцу')
+
+    def all_in_bot(self, dim, hole=('7d', '6d'), pot=51.7, call=23.7):
+        """Кадр живой раздачи 19.08 09:52 #27: банк 51.7, колл 23.7, стол 3-max.
+
+        dim — погашен ли столбец ставки целиком (оппонент в алл-ине, рейзить
+        нечем). Чарт тот же, что играл бот, и стек тот же — 69.6ББ.
+        """
+        frame = synth.render(hole=list(hole), board=[], buttons=True,
+                             call_amount=call, pot_bb=pot, dealer='me',
+                             players=2, sitting_out=1, presets=3,
+                             dim_presets=(0, 1, 2, 3) if dim else ())
+        chart = strategy.load_chart(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'charts', 'gto_6max.json'))
+        return self.make_bot([frame], tpl_dir=self.numeric_tpl(), chart=chart,
+                             stack_bb=69.6)
+
+    def test_all_in_against_suited_connector_is_folded(self):
+        """Главный баг: 76s заколлил алл-ин 23.7ББ (34% стека) вместо фолда.
+
+        Стратегия выдавала «3-бет на велью» (76s есть в 3-бете чарта gto_6max),
+        живого пресета рейза не было, и главный цикл молча менял рейз на колл.
+        """
+        bot, screen = self.all_in_bot(dim=True)
+        entry = bot.step()
+        self.assertEqual(entry['hole'], ['7d', '6d'])
+        self.assertEqual((entry['pot_bb'], entry['to_call_bb']), (51.7, 23.7))
+        self.assertEqual((entry['position'], entry['players_seated']), ('BTN', 3))
+        self.assertEqual(entry['action'], 'fold', entry['reason'])
+        self.assertNotIn('невозможен -> call', entry['reason'])
+        self.assertEqual(len(screen.taps), 1)
+        self.assertLess(screen.taps[0][0], 400, 'тап по фолду, а не по коллу')
+
+    def test_all_in_is_called_with_premium(self):
+        """Обратная сторона: премиум против алл-ина коллирует, а не пасует."""
+        bot, screen = self.all_in_bot(dim=True, hole=('Ah', 'Kd'))
+        entry = bot.step()
+        self.assertEqual(entry['action'], 'call', entry['reason'])
+        self.assertIn('пот-оддсам', entry['reason'])
+        with open(bot.log_path, encoding='utf-8') as f:
+            self.assertIn('рейз недоступен', f.read())
+
+    def test_three_bet_against_a_normal_open_is_kept(self):
+        """Первое действие той же раздачи (09:52:19): открытие 0.5ББ при банке 1.5.
+
+        Здесь 3-бет с 76s по чарту законен — фикс не должен его трогать.
+        """
+        bot, screen = self.all_in_bot(dim=False, pot=1.5, call=0.5)
+        entry = bot.step()
+        self.assertEqual((entry['pot_bb'], entry['to_call_bb']), (1.5, 0.5))
+        self.assertEqual(entry['action'], 'raise', entry['reason'])
 
     # ---------- свёрнутый столбец ставки: двухшаговый тап ----------
     def collapsed_bot(self, frames, dry_run=False):
