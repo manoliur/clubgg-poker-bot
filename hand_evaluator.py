@@ -327,7 +327,11 @@ def _two_pair_grade(hole, board, score):
 
     Доска K K 5 и наши A5: «две пары KK55» — на деле пятёрка с тузом, любой
     король бьёт нас трипсом. Настоящие две пары — только когда обе собраны
-    нашими картами, либо карманная пара выше пары доски.
+    нашими картами, либо карманная пара выше пары доски. А если старшая пара
+    целиком лежит на доске, наша вторая пара мельче и почти ничего не стоит:
+    любая восьмёрка (трипс), пара выше (66, 77) или пара доски с лучшим
+    кикером нас бьют (живая раздача 19.08 #58: Ac4c на 8s8d4s6hKd — «две
+    пары 8/4», колл на ривере, у оппонента K8).
     """
     bv = [v for v, _ in parse_cards(board)]
     hv = sorted((v for v, _ in parse_cards(hole)), reverse=True)
@@ -341,6 +345,9 @@ def _two_pair_grade(hole, board, score):
     pocket = len(hv) == 2 and hv[0] == hv[1]
     if pocket and hv[0] in ours and hv[0] > top_board:
         return 'strong', ''
+    if score[1] in board_pairs:
+        return 'weak', (f'пара {VALUE_RANK[score[1]]} на доске — общая, '
+                        f'наша пара {VALUE_RANK[max(ours)]} мельче')
     return 'medium', f'пара {VALUE_RANK[top_board]} на доске — вторая пара общая'
 
 

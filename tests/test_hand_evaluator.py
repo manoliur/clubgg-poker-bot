@@ -281,7 +281,7 @@ class MadeHandRankTest(unittest.TestCase):
     def test_two_pair_with_the_board_pair_is_not_strong(self):
         """Доска K K 5 и наши A5: «две пары» есть у всех, у нас пятёрка с тузом."""
         c = hand_class(['Ac', '5d'], ['Ks', 'Kd', '5c', '2h', '9s'])
-        self.assertEqual(c['made'], 'medium', c['made_note'])
+        self.assertEqual(c['made'], 'weak', c['made_note'])
         self.assertIn('на доске', c['made_note'])
         # обе пары на доске — мы играем один кикер
         both = hand_class(['Ac', '7d'], ['Ks', 'Kd', '5c', '5h', '9s'])
@@ -289,9 +289,30 @@ class MadeHandRankTest(unittest.TestCase):
         # своя карманная пара выше пары доски — настоящие две пары
         self.assertEqual(hand_class(['Ac', 'Ad'], ['9s', '9d', '4c'])['made'], 'strong')
         # ...а ниже пары доски — нет: любой король бьёт нас трипсом
-        self.assertEqual(hand_class(['9c', '9d'], ['Ks', 'Kd', '4c'])['made'], 'medium')
+        self.assertEqual(hand_class(['9c', '9d'], ['Ks', 'Kd', '4c'])['made'], 'weak')
         # доска без пары — две пары остаются сильной рукой
         self.assertEqual(hand_class(['Ah', 'Kc'], ['Ad', 'Kd', '2c'])['made'], 'strong')
+
+    def test_two_pair_under_board_pair_is_weak(self):
+        """Живая раздача 19.08 #58: Ac4c на 8s8d4s6hKd — «две пары 8/4».
+
+        Пара 8 целиком на доске (общая у всех), наша пара 4 мельче — рука
+        слабая: любая 8 (трипс), пара 6/7 (8866/8877) или пара доски с лучшим
+        кикером бьют нас. Раньше был 'medium' — бот коллил ставку на ривере
+        и проигрывал оппоненту с K8.
+        """
+        c = hand_class(['Ac', '4c'], ['8s', '8d', '4s', '6h', 'Kd'])
+        self.assertEqual(c['made'], 'weak', c['made_note'])
+        self.assertIn('8', c['made_note'])
+        # то же на флопе
+        flop = hand_class(['Ac', '4c'], ['8s', '8d', '4s'])
+        self.assertEqual(flop['made'], 'weak', flop['made_note'])
+        # а вот карманная пара выше пары доски — по-прежнему сильная
+        over = hand_class(['Qc', 'Qd'], ['8s', '8d', '4s'])
+        self.assertEqual(over['made'], 'strong', over['made_note'])
+        # пара с нашей картой, но старшая не с доски (AcQs на AA44) — средняя
+        mixed = hand_class(['Ac', 'Qs'], ['5c', '4h', '4c', '9d', 'Ah'])
+        self.assertEqual(mixed['made'], 'medium', mixed['made_note'])
 
     def test_underpair_with_one_overcard_is_medium(self):
         """QQ на K-7-2 — вторая пара с лучшим кикером, одну ставку она держит."""
