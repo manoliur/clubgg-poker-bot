@@ -180,6 +180,54 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(s['flags']['blocker_bluff'])
         self.assertAlmostEqual(s['sliders']['cbet_pot'], 0.55)
 
+    def test_live_stack_flag_is_on_by_default(self):
+        serial = self.mgr.devices[0]['serial']
+        with mock.patch.object(self.mgr, 'adb_online', return_value=[]):
+            s = self.mgr.status(serial)
+        self.assertTrue(s['flags']['live_stack'])
+        self.assertFalse(s['stack_auto'])
+
+    def test_live_stack_flag_is_saved(self):
+        serial = self.mgr.devices[0]['serial']
+        self.mgr.save_config(serial, {'live_stack': False})
+        with open(self.path, encoding='utf-8') as f:
+            self.assertIs(json.load(f)[0]['live_stack'], False)
+
+    def test_stack_written_by_the_bot_is_picked_up(self):
+        """Бот правит devices.json на ходу — панель показывает новое значение."""
+        serial = self.mgr.devices[0]['serial']
+        devices = json.load(open(self.path, encoding='utf-8'))
+        devices[0]['stack'] = 61.2
+        devices[0]['stack_auto'] = True
+        with open(self.path, 'w', encoding='utf-8') as f:
+            json.dump(devices, f)
+        os.utime(self.path, (0, 1_700_000_100))
+        with mock.patch.object(self.mgr, 'adb_online', return_value=[]):
+            s = self.mgr.status(serial)
+        self.assertEqual(s['stack'], 61.2)
+        self.assertTrue(s['stack_auto'])
+
+    def test_manual_stack_is_not_auto_and_keeps_the_read_one_out(self):
+        serial = self.mgr.devices[0]['serial']
+        self.mgr.save_config(serial, {'stack': 61.2})       # как будто писал бот
+        self.mgr.device(serial)['stack_auto'] = True
+        self.mgr.save_devices()
+        self.mgr.save_config(serial, {'stack': 30.0})       # а теперь человек
+        d = self.mgr.device(serial)
+        self.assertEqual(d['stack'], 30.0)
+        self.assertIs(d['stack_auto'], False)
+
+    def test_start_turns_live_stack_off(self):
+        serial = self.mgr.devices[0]['serial']
+        self.mgr.save_config(serial, {'live_stack': False})
+        with mock.patch.object(self.panel.subprocess, 'Popen') as popen, \
+             mock.patch.object(self.panel.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+            popen.return_value = mock.Mock(pid=4242)
+            with mock.patch.object(self.panel, 'LOGS_DIR', self.tmp):
+                ok, _ = self.mgr.start(serial)
+        self.assertTrue(ok)
+        self.assertIn('--no-live-stack', popen.call_args[0][0])
+
     def test_styles_for_the_dropdown(self):
         styles = self.mgr.styles()
         self.assertEqual(set(styles), set(st.STYLE_PRESETS))

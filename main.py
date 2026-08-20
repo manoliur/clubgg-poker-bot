@@ -80,6 +80,8 @@ class Bot:
     EXPAND_WAIT = 0.7        # сколько ждать перерисовки после тапа шеврона, с
     EXPAND_TRIES = 2         # столько кадров перечитываем (тап при этом ОДИН)
     PRESET_FRAC_TOL = 0.2    # ближе этого к нужной доле банка — размер устраивает
+    STACK_SANE_MULT = 10.0   # стек с экрана дальше 10x начального — не верим
+    STACK_EPS = 0.05         # мельче — то же значение (не пишем файл и не логируем)
 
     def __init__(self, screen, dry_run=False, stack_bb=69.6, players_db=None,
                  tpl_dir=None, log_path=None, history_path=None, chart=None,
@@ -87,6 +89,11 @@ class Bot:
         self.screen = screen
         self.dry_run = dry_run
         self.stack_bb = stack_bb
+        # стек, от которого считается «здравый» диапазон живого чтения: значение
+        # с экрана дальше STACK_SANE_MULT от него — почти наверняка мусор
+        self.start_stack_bb = stack_bb
+        self.live_stack = True          # читать свой стек с экрана (флаг live_stack)
+        self.stack_auto = False         # текущее значение прочитано ботом, а не панелью
         self.players_db = players_db or {}
         # копия: настройки меняются на лету (панель), чарт по умолчанию — общий на процесс
         self.chart = (chart or strategy.active_chart()).copy()
@@ -236,10 +243,16 @@ class Bot:
         settings = strategy.device_settings(self.base_settings, cfg)
         changed = [k for k, v in settings.items() if self.chart.settings.get(k) != v]
         self.chart.settings = settings
+        self.live_stack = bool(cfg.get('live_stack', True))
         stack = cfg.get('stack')
         if stack:
             try:
                 self.stack_bb = float(stack)
+                self.stack_auto = bool(cfg.get('stack_auto'))
+                if not self.stack_auto:
+                    # стек задан человеком (панель/ключ запуска) — от него и
+                    # считаем границы здравого чтения с экрана
+                    self.start_stack_bb = self.stack_bb
             except (TypeError, ValueError):
                 pass
         if changed and not quiet:
@@ -274,6 +287,83 @@ class Bot:
         if record is None:
             return False
         return bool(self.apply_config({**self.cli_cfg, **record}))
+
+    # ---------- живой стек ----------
+    def stack_sane(self, value):
+        """Похоже ли прочитанное с экрана число на наш стек.
+
+        Верхняя граница — STACK_SANE_MULT от самого большого стека, который мы
+        видели (заданного человеком или уже прочитанного): выиграть за одну
+        раздачу больше десяти своих стеков нельзя, а вот потерянная десятичная
+        точка («118.4» -> 1184) — это ровно 10x и отсекается именно так.
+        """
+        base = max(self.start_stack_bb or 0.0, self.stack_bb or 0.0)
+        return bool(value and value > 0
+                    and (not base or value < self.STACK_SANE_MULT * base))
+
+    def update_stack(self, img):
+        """Прочитать свой стек с экрана и запомнить его. Возвращает ББ или None.
+
+        Вызывается РАЗ В РАЗДАЧУ (см. step): чтение стоит распознавания глифов,
+        а внутри раздачи наш стек меняется только на нашу же ставку, которую
+        стратегия и так учитывает как долю стека.
+        """
+        if not self.live_stack or img is None:
+            return None
+        try:
+            value = ts.read_own_stack(img, tpl_dir=self.tpl_dir)
+        except Exception as e:                   # чтение кадра не должно ронять ход
+            self.log(f'стек не прочитан ({type(e).__name__}: {e}) — '
+                     f'использую {self.stack_bb:.1f} ББ')
+            return None
+        if value is None or not self.stack_sane(value):
+            self.log(f'стек не прочитан{"" if value is None else f" (мусор {value})"} — '
+                     f'использую {self.stack_bb:.1f} ББ')
+            return None
+        if abs(value - self.stack_bb) < self.STACK_EPS and self.stack_auto:
+            return value                         # то же значение — файл не трогаем
+        self.stack_bb = value
+        self.stack_auto = True
+        self.log(f'стек: {value:.1f} ББ (с экрана)')
+        self.save_stack(value)
+        return value
+
+    def save_stack(self, value):
+        """Записать свой стек в devices.json: только поля stack/stack_auto своей записи.
+
+        Файл читается целиком и пишется целиком (панель формата не знает иного),
+        поэтому чужие устройства и любые чужие ключи переносятся как есть, а
+        подменяются ровно два поля. Записи с нашим серийником нет — не выдумываем
+        её: значит, панель этим телефоном не управляет.
+        """
+        if not self.serial:
+            return False
+        try:
+            with open(self.devices_path, encoding='utf-8') as f:
+                devices = json.load(f)
+        except (OSError, ValueError) as e:
+            self.log(f'стек не записан в devices.json ({e})')
+            return False
+        if not isinstance(devices, list):
+            self.log('стек не записан: devices.json — не список устройств')
+            return False
+        record = next((d for d in devices if isinstance(d, dict)
+                       and d.get('serial') == self.serial), None)
+        if record is None:
+            return False
+        record['stack'] = round(float(value), 1)
+        record['stack_auto'] = True
+        tmp = self.devices_path + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(devices, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.devices_path)   # панель не должна прочитать полфайла
+            # свою же запись перечитывать незачем: mtime сдвинули мы сами
+            self._cfg_mtime = os.path.getmtime(self.devices_path)
+        except OSError as e:
+            self.log(f'стек не записан в devices.json ({e})')
+            return False
+        return True
 
     def bluff_ok(self, state):
         """Разрешён ли блеф с блокером в этой ситуации: не чаще одной из N.
@@ -400,6 +490,10 @@ class Bot:
         if hole and hole != self.last_hole:
             self.hand_id += 1
             self.last_hole = hole
+            # стек читаем на первом ходе раздачи: короткий стек, «колл ≥ доли
+            # стека = алл-ин» и имплайд-оддсы должны считаться от правды, а не
+            # от константы, записанной в панели один раз
+            self.update_stack(img)
 
         decision = self.decide(state)
         # свёрнутый столбец ставки: сначала раскрыть его шевроном, потом решать
@@ -627,6 +721,8 @@ def main(argv=None):
     ap.add_argument('--interval', type=float, default=0.3, help='пауза между кадрами, с (простой; на ходу — подряд)')
     ap.add_argument('--settle', type=float, default=2.5, help='пауза после своего хода, с')
     ap.add_argument('--stack', type=float, default=69.6, help='стек в ББ')
+    ap.add_argument('--no-live-stack', action='store_true',
+                    help='не читать свой стек с экрана (играть по --stack)')
     ap.add_argument('--max-actions', type=int, help='сыграть N решений и выйти')
     ap.add_argument('--adb', help=f'путь к adb (по умолчанию {config.ADB})')
     ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
@@ -656,7 +752,8 @@ def main(argv=None):
     # Ключи запуска — только запасные значения: живые настройки бот берёт из
     # devices.json по своему серийнику и перечитывает их перед каждым решением.
     cli_cfg = {'style': args.style, 'aggression': args.aggression,
-               'defense': args.defense, 'stack': args.stack}
+               'defense': args.defense, 'stack': args.stack,
+               'live_stack': not args.no_live_stack}
     print(f'настройки: стиль {args.style}, агрессия x{args.aggression}, '
           f'защита x{args.defense}')
 
