@@ -73,6 +73,9 @@ THREE_BET_VALUE_HU = '77+, ATs+, AQo+, KQs'
 FOUR_BET = 'QQ+, AKs, AKo'
 
 PREMIUM = 'JJ+, AQs+, AKo'
+# Короткий стек: с чем идём в алл-ин вместо мин-рейза (пересекается с диапазоном
+# открытия по позиции — с BTN пушим шире, чем с UTG).
+PUSH_RANGE = '22+, A2s+, A7o+, K9s+, KJo+, QTs+, JTs, T9s'
 
 OPEN_SIZE_BB = 2.5          # открытие рейзом
 THREE_BET_MULT = 3.0        # 3-бет = 3x предыдущего рейза
@@ -80,7 +83,8 @@ CBET_POT = 0.6              # ставка на велью, доля банка
 NUTS_POT = 0.75             # с натсами берём дороже: заряжаем дро и вторую руку
 SEMI_BLUFF_POT = 0.45       # полу-блеф с дро
 
-# Настройки розыгрыша (их переопределяет секция "postflop" чарта).
+# Настройки розыгрыша (их переопределяет секция "postflop" чарта, а поверх —
+# стиль и переключатели устройства из devices.json, см. device_settings).
 DEFAULT_SETTINGS = {
     'open_size_bb': OPEN_SIZE_BB,
     'three_bet_mult': THREE_BET_MULT,
@@ -96,7 +100,77 @@ DEFAULT_SETTINGS = {
     'big_bet_price': 0.25,      # префлоп: цена, при которой крупную ставку коллят и без премиума
     'implied_pot_mult': 1.0,    # сколько банков доберём на следующей улице, когда дро зайдёт
     'all_in_frac': 0.50,        # колл дороже доли стека = алл-ин: ставок больше не будет
+    # --- размеры ставок по силе руки и улице (работают при bet_sizing) ---
+    'bet_sizing': False,        # выкл = старое поведение (cbet_pot/nuts_pot/semi_bluff_pot)
+    'bet_nuts': 0.75,           # натс — забираем банк целиком
+    'bet_strong': 0.60,
+    'bet_medium': 0.50,
+    'bet_draw': 0.45,
+    'street_factor_flop': 1.0,  # множители размера по улицам
+    'street_factor_turn': 1.0,
+    'street_factor_river': 1.0,
+    # --- мультипот (3+ игрока в раздаче) ---
+    'multiway_tight': True,
+    'multiway_value_mult': 0.8,   # ставка на велью в мультипоте меньше
+    'multiway_price_mult': 0.75,  # и коллим только по чётким пот-оддсам
+    # --- короткий стек ---
+    'short_stack_mode': True,
+    'short_stack_bb': 30.0,       # ниже этого — push/fold на префлопе
+    'short_stack_price_mult': 1.35,   # коллим шире: ставок дальше почти не будет
+    'short_stack_bet_mult': 1.3,      # и ставим крупнее — на стек
+    # --- блеф с блокерами (ривер) ---
+    'blocker_bluff': False,
+    'blocker_bluff_pot': 0.6,
+    'blocker_bluff_every': 3,     # не чаще одной такой ситуации из трёх
+    # --- игра без позиции ---
+    'position_aware': False,
 }
+
+# Пресеты стиля: готовые наборы настроек под кнопку в панели. Ползунки агрессии
+# и защиты применяются ПОВЕРХ выбранного стиля (см. apply_aggression_defense).
+# Диапазоны рук стиль не трогает — они берутся из чарта (charts/*.json).
+STYLE_PRESETS = {
+    'tighty': {
+        'open_size_bb': 3.0, 'cbet_pot': 0.55, 'nuts_pot': 0.75, 'semi_bluff_pot': 0.35,
+        'aggression': 0.9,
+        'medium_max_price': 0.30, 'draw_min_equity': 0.38, 'cheap_price': 0.08,
+        'max_call_stack_frac': 0.15, 'preflop_max_price': 0.36, 'big_bet_price': 0.20,
+        'implied_pot_mult': 0.8,
+        'bet_nuts': 0.75, 'bet_strong': 0.55, 'bet_medium': 0.40, 'bet_draw': 0.35,
+        'street_factor_flop': 0.9, 'street_factor_turn': 1.0, 'street_factor_river': 1.0,
+        'short_stack_bb': 25.0,
+    },
+    'standard': {},                                  # DEFAULT_SETTINGS как есть
+    'aggressive': {
+        'open_size_bb': 2.8, 'three_bet_mult': 3.5, 'cbet_pot': 0.70, 'nuts_pot': 0.90,
+        'semi_bluff_pot': 0.60,
+        'aggression': 1.2,
+        # коллит как стандарт: агрессия — про ставки, а не про рыхлые коллы
+        'medium_max_price': 0.40, 'draw_min_equity': 0.33, 'cheap_price': 0.12,
+        'max_call_stack_frac': 0.20, 'preflop_max_price': 0.45, 'big_bet_price': 0.25,
+        'bet_nuts': 0.90, 'bet_strong': 0.70, 'bet_medium': 0.55, 'bet_draw': 0.55,
+        'street_factor_flop': 1.1, 'street_factor_turn': 1.0, 'street_factor_river': 1.05,
+    },
+    'loose': {
+        'open_size_bb': 2.2, 'cbet_pot': 0.60, 'nuts_pot': 0.75, 'semi_bluff_pot': 0.50,
+        'aggression': 1.05,
+        'medium_max_price': 0.50, 'draw_min_equity': 0.28, 'cheap_price': 0.18,
+        'max_call_stack_frac': 0.28, 'preflop_max_price': 0.55, 'big_bet_price': 0.32,
+        'implied_pot_mult': 1.3,
+        'bet_nuts': 0.75, 'bet_strong': 0.60, 'bet_medium': 0.50, 'bet_draw': 0.50,
+        'short_stack_bb': 35.0,
+    },
+}
+DEFAULT_STYLE = 'standard'
+# подписи для панели: ключ -> что увидит человек
+STYLE_TITLES = {'tighty': 'Тайтовый', 'standard': 'Стандарт',
+                'aggressive': 'Агрессивный', 'loose': 'Лузовый'}
+# Переключатели «вкл/выкл» — панель пишет их в devices.json как true/false.
+FLAG_KEYS = ('bet_sizing', 'multiway_tight', 'short_stack_mode', 'blocker_bluff',
+             'position_aware')
+# Ключи настроек, которые панель может класть прямо в запись устройства.
+# 'aggression' исключён: в devices.json это ползунок-множитель, а не сама настройка.
+DEVICE_SETTING_KEYS = tuple(k for k in DEFAULT_SETTINGS if k != 'aggression')
 
 # Примерное эквити готовой руки против крупной ставки/алл-ина — по классу силы.
 # Крупная ставка почти всегда значит, что у оппонента тоже что-то есть, поэтому
@@ -238,9 +312,19 @@ class Chart:
         self.three_bet_hu = data.get('three_bet_hu', THREE_BET_VALUE_HU)
         self.four_bet = data.get('four_bet', FOUR_BET)
         self.premium = data.get('premium', PREMIUM)
+        self.push = data.get('push', PUSH_RANGE)
         self.settings = {**DEFAULT_SETTINGS, **(data.get('postflop') or {})}
-        for spec in (self.three_bet, self.three_bet_hu, self.four_bet, self.premium):
+        for spec in (self.three_bet, self.three_bet_hu, self.four_bet, self.premium,
+                     self.push):
             parse_range(spec)
+
+    def copy(self):
+        """Отдельный экземпляр с теми же правилами: настройки можно менять на лету,
+        не задевая чарт по умолчанию (он один на процесс)."""
+        import copy as _copy
+        other = _copy.copy(self)
+        other.settings = dict(self.settings)
+        return other
 
     def range_for(self, position, players, kind='open'):
         """Диапазон для позиции: хедз-ап отдельный, иначе 6-max таблицы.
@@ -258,6 +342,36 @@ class Chart:
     def size(self, key):
         """Размер ставки с учётом общей агрессии чарта."""
         return self.settings[key] * self.settings['aggression']
+
+    # какими ключами меряется ставка: старым способом и по силе руки (bet_sizing)
+    _LEGACY_SIZE = {'nuts': 'nuts_pot', 'strong': 'cbet_pot', 'medium': 'cbet_pot',
+                    'draw': 'semi_bluff_pot'}
+    _STRENGTH_SIZE = {'nuts': 'bet_nuts', 'strong': 'bet_strong', 'medium': 'bet_medium',
+                      'draw': 'bet_draw'}
+
+    def bet_frac(self, kind, street=None, multiway=False, short=False, mult=1.0):
+        """Доля банка для ставки рукой силы kind ('nuts'/'strong'/'medium'/'draw').
+
+        При bet_sizing размер зависит от силы руки и улицы (натс на ривере —
+        максимум), иначе работают старые ключи cbet_pot/nuts_pot/semi_bluff_pot
+        и поведение бота не меняется. Больше банка не ставим: крупнее пресета
+        «100% банка» в клиенте всё равно ничего нет.
+        """
+        st = self.settings
+        if st['bet_sizing']:
+            frac = st[self._STRENGTH_SIZE[kind]]
+            if street:
+                frac *= st.get(f'street_factor_{street}', 1.0)
+        else:
+            frac = st[self._LEGACY_SIZE[kind]]
+            if kind == 'medium':
+                frac *= 0.8                       # конт-бет средней рукой — поменьше
+        frac *= st['aggression'] * mult
+        if multiway:
+            frac *= st['multiway_value_mult']     # в мультипоте велью-ставка меньше
+        if short:
+            frac *= st['short_stack_bet_mult']    # с коротким стеком ставим на стек
+        return round(min(frac, 1.0), 3)
 
     def describe(self):
         lines = [f'чарт: {self.name}' + (f' ({self.path})' if self.path else '')]
@@ -339,6 +453,65 @@ def range_for(position, players, kind='open', chart=None):
 
 
 # --------------------------------------------------------------------------
+# настройки устройства: стиль + переключатели + ползунки
+# --------------------------------------------------------------------------
+def style_settings(style, base=None):
+    """Настройки выбранного стиля поверх базовых (обычно — настроек чарта).
+
+    Неизвестный стиль = 'standard': панель не должна ронять бота опечаткой.
+    """
+    out = dict(base if base is not None else DEFAULT_SETTINGS)
+    out.update(STYLE_PRESETS.get(str(style or DEFAULT_STYLE).lower().strip(),
+                                 STYLE_PRESETS[DEFAULT_STYLE]))
+    return out
+
+
+def apply_aggression_defense(settings, aggression=1.0, defense=1.0):
+    """Ползунки панели поверх готовых настроек. Возвращает НОВЫЙ словарь.
+
+    Агрессия — общий множитель размеров ставок, защита — готовность коллить
+    (выше пороги цены, ниже нужное эквити дро). Функция идемпотентна
+    относительно исходного словаря: её всегда применяют к базе, а не к
+    результату прошлого применения, поэтому настройки не «уползают» при каждом
+    перечитывании devices.json.
+    """
+    out = dict(settings)
+    aggression = float(aggression or 1.0)
+    defense = float(defense or 1.0)
+    out['aggression'] = round(out.get('aggression', 1.0) * aggression, 3)
+    for key in ('medium_max_price', 'preflop_max_price', 'cheap_price', 'big_bet_price',
+                'max_call_stack_frac'):
+        out[key] = round(out[key] * defense, 3)
+    out['draw_min_equity'] = round(out['draw_min_equity'] / defense, 3)
+    return out
+
+
+def device_settings(base, cfg, sliders=True):
+    """Настройки бота по записи устройства из devices.json.
+
+    Порядок: настройки чарта -> пресет стиля -> отдельные ключи из записи
+    (в том числе вложенная секция "settings") -> ползунки агрессии/защиты.
+    Ползунки идут последними, поэтому смена стиля их не отменяет.
+
+    sliders=False — без агрессии и защиты: панель показывает пороги такими,
+    какими их сохранит обратно, иначе множители накручивались бы при каждом
+    открытии страницы.
+    """
+    cfg = cfg or {}
+    out = style_settings(cfg.get('style'), base)
+    for key in DEVICE_SETTING_KEYS:
+        if key in cfg and cfg[key] is not None:
+            out[key] = bool(cfg[key]) if key in FLAG_KEYS else float(cfg[key])
+    for key, value in (cfg.get('settings') or {}).items():
+        if key in DEFAULT_SETTINGS and value is not None:
+            out[key] = bool(value) if key in FLAG_KEYS else float(value)
+    if not sliders:
+        return out
+    return apply_aggression_defense(out, cfg.get('aggression', 1.0),
+                                    cfg.get('defense', 1.0))
+
+
+# --------------------------------------------------------------------------
 # помощники
 # --------------------------------------------------------------------------
 def pot_odds(to_call_bb, pot_bb):
@@ -366,6 +539,62 @@ def implied_price(to_call_bb, pot_bb, stack_bb, mult):
 
 def _d(action, reason, amount=None, pot_frac=None):
     return {'action': action, 'amount_bb': amount, 'reason': reason, 'pot_frac': pot_frac}
+
+
+def is_short(stack_bb, settings):
+    """Короткий стек: ставок впереди почти не осталось, играем на весь стек."""
+    return bool(settings['short_stack_mode'] and stack_bb
+                and stack_bb < settings['short_stack_bb'])
+
+
+def nut_blocker(hole, board):
+    """Чем наша рука мешает оппоненту иметь натс. Пустая строка — ничем.
+
+    Считаются две вещи: туз/король в масти, которой на доске 3+ карты (натс-флеша
+    у оппонента быть не может — старшая карта масти у нас), и карта, которой
+    собирается старший возможный стрит.
+    """
+    try:
+        hv, bv = he.parse_cards(hole), he.parse_cards(board)
+    except (he.BadCard, ValueError):
+        return ''
+    suits = {}
+    for _, s in bv:
+        suits[s] = suits.get(s, 0) + 1
+    for v, s in hv:
+        if v >= RANK_VALUE['K'] and suits.get(s, 0) >= 3:
+            return f'{VALUE_RANK[v]}{s} — нет натс-флеша'
+    high = he._best_possible_straight(board)
+    if high and any(v == high for v, _ in hv):
+        return f'{VALUE_RANK[high]} — нет старшего стрита'
+    return ''
+
+
+def blocker_bluff_spot(state, chart=None, stack_bb=100.0):
+    """Ривер, готовой руки нет, но у нас блокер натса — та самая ситуация для блефа.
+
+    Отдельная функция нужна главному циклу: частоту блефа считает бот (счётчик
+    «не чаще одной из N»), а распознаёт ситуацию стратегия.
+    """
+    chart = chart or _ACTIVE
+    if not chart.settings['blocker_bluff'] or state.get('has_bet') or state.get('no_raise'):
+        return False
+    if state.get('street') != 'river':
+        return False
+    players = state.get('players')
+    if chart.settings['multiway_tight'] and players is not None and players >= 3:
+        return False
+    hole = [c for c in (state.get('hole') or []) if c]
+    board = [c for c in (state.get('board') or []) if c]
+    if len(hole) != 2 or len(board) != 5:
+        return False
+    try:
+        # на ривере «дро» — тот же воздух: доборной карты больше нет
+        if he.hand_class(hole, board)['made'] not in ('air', 'draw'):
+            return False
+    except (he.BadCard, ValueError):
+        return False
+    return bool(nut_blocker(hole, board))
 
 
 def _odds_note(price, equity):
@@ -412,18 +641,30 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
     value3bet = chart.three_bet_hu if hu else chart.three_bet
     open_size = chart.size('open_size_bb')
     mult = st['three_bet_mult']
+    # Короткий стек: мин-рейз здесь только раздувает банк, которым потом нечем
+    # играть, — заходим сразу на весь стек, а коллим шире (ставок дальше не будет).
+    short = is_short(stack_bb, st)
+    note = f' [короткий стек {stack_bb:.0f}ББ — push/fold]' if short else ''
+    price_mult = st['short_stack_price_mult'] if short else 1.0
 
     if not has_bet:
         # никто не поставил: открываемся рейзом или чекаем (мы в ББ)
         if no_raise:
             return _d('check', f'{code}: ставить нечем (живого пресета нет) — чек')
+        if short:
+            # пушим только тем, что и открывали бы с этой позиции: с BTN шире, с UTG уже
+            push_rng = parse_range(chart.push) & parse_range(open_rng or chart.push)
+            if hand_code(hole) in push_rng:
+                return _d('raise', f'{code}: алл-ин {stack_bb:.0f}ББ вместо рейза{note}',
+                          stack_bb, pot_frac=1.0)
+            return _d('check', f'{code}: вне пуш-диапазона{note}')
         if in_range(hole, open_rng):
             return _d('raise', f'{code}: открытие с {position or "?"} '
                                f'(диапазон {"HU" if hu else "6-max"}, {chart.name})', open_size)
         return _d('check', f'{code}: вне диапазона открытия, но чек бесплатный')
 
     # перед нами ставка
-    cap = st['max_call_stack_frac']
+    cap = st['max_call_stack_frac'] * price_mult
     premium = in_range(hole, chart.premium)
     price = pot_odds(to_call_bb, pot_bb)
     # Ставка больше cap стека — это уже алл-ин или 4-бет: поднимать её «на велью»
@@ -432,9 +673,15 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
     big = to_call_bb is not None and stack_bb and to_call_bb > cap * stack_bb
     if not no_raise and not (big and not premium):
         if in_range(hole, chart.four_bet):
+            if short:
+                return _d('raise', f'{code}: премиум — алл-ин {stack_bb:.0f}ББ{note}',
+                          stack_bb, pot_frac=1.0)
             return _d('raise', f'{code}: премиум — 4-бет/олл-ин',
                       max(open_size * 3, (to_call_bb or open_size) * mult))
         if in_range(hole, value3bet):
+            if short:
+                return _d('raise', f'{code}: алл-ин {stack_bb:.0f}ББ вместо 3-бета{note}',
+                          stack_bb, pot_frac=1.0)
             return _d('raise', f'{code}: 3-бет на велью', (to_call_bb or open_size) * mult)
     else:
         # Рейза не будет — руки, которыми мы бы повысили, уходят в колл: они
@@ -445,40 +692,64 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
                     | parse_range(chart.four_bet))
 
     versus = _versus(no_raise, to_call_bb, stack_bb) if (big or no_raise) else ''
+    big_price = st['big_bet_price'] * price_mult
+    max_price = st['preflop_max_price'] * price_mult
     if in_range(hole, call_rng):
         if big and not premium:
             # Цена решает и здесь: против алл-ина в раздутый банк рука из
             # диапазона колла окупается и без премиума (25% банка — это 3:1,
             # столько эквити есть у любой руки, которой мы вообще играем).
-            if price is not None and price < st['big_bet_price']:
+            if price is not None and price < big_price:
                 return _d('call', f'{code}: колл {to_call_bb}ББ {versus} — пот-оддсы '
-                                  f'{price:.0%} ниже порога {st["big_bet_price"]:.0%}')
+                                  f'{price:.0%} ниже порога {big_price:.0%}{note}')
             return _d('fold', f'{code}: фолд {versus} — колл {to_call_bb}ББ больше '
                               f'{cap:.0%} стека, без премиума'
-                      + (f' (пот-оддсы {price:.0%})' if price is not None else ''))
+                      + (f' (пот-оддсы {price:.0%})' if price is not None else '') + note)
         # префлоп цена колла обычно 30-40% банка — это нормально (имплайд-оддсы),
         # отказываемся только от совсем безнадёжной цены
-        if price is not None and price > st['preflop_max_price'] and not premium:
-            return _d('fold', f'{code}: цена {price:.0%} банка слишком высока')
+        if price is not None and price > max_price and not premium:
+            return _d('fold', f'{code}: цена {price:.0%} банка слишком высока{note}')
         if versus:
             odds = f' по пот-оддсам {price:.0%}' if price is not None else ''
-            return _d('call', f'{code}: колл {to_call_bb}ББ {versus}{odds}')
+            return _d('call', f'{code}: колл {to_call_bb}ББ {versus}{odds}{note}')
         return _d('call', f'{code}: колл по диапазону {position or "?"}')
     return _d('fold', f'{code}: вне диапазона на {position or "?"}'
-              + (f' — фолд {versus}' if versus else ''))
+              + (f' — фолд {versus}' if versus else '') + note)
 
 
 # --------------------------------------------------------------------------
 # постфлоп
 # --------------------------------------------------------------------------
 def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-                    chart=None, no_raise=False):
-    """Решение после флопа. no_raise — рейз/ставка недоступны (живого пресета нет).
+                    chart=None, no_raise=False, oop=None, bluff_ok=True):
+    """Решение после флопа с пометкой режима в причине (мультипот, короткий стек).
+
+    Сам розыгрыш считает _postflop, здесь к причине дописывается, почему бот
+    сыграл не как обычно, — чтобы это было видно в логе панели.
+    """
+    chart = chart or _ACTIVE
+    st = chart.settings
+    multiway = bool(st['multiway_tight'] and players is not None and players >= 3)
+    short = is_short(stack_bb, st)
+    decision = _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb,
+                         players, chart, no_raise, multiway, short, oop, bluff_ok)
+    notes = []
+    if multiway:
+        notes.append(f'мультипот {players} игроков — играем тайтовее')
+    if short:
+        notes.append(f'короткий стек {stack_bb:.0f}ББ — играем на стек')
+    if notes:
+        decision = dict(decision, reason=decision['reason'] + ' | ' + '; '.join(notes))
+    return decision
+
+
+def _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
+              chart, no_raise, multiway, short, oop, bluff_ok):
+    """Розыгрыш после флопа. no_raise — рейз/ставка недоступны (живого пресета нет).
 
     Тогда сильная рука коллит вместо рейза, а полу-блеф отменяется: блефовать
     коллом нельзя, и решение остаётся за пот-оддсами.
     """
-    chart = chart or _ACTIVE
     st = chart.settings
     cls = he.hand_class(hole, board)
     made, outs, draws = cls['made'], cls['outs'], cls['draws']
@@ -492,8 +763,16 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
     all_in = bool(no_raise or (to_call_bb and stack_bb
                                and to_call_bb >= st['all_in_frac'] * stack_bb))
     hu = players is not None and players <= 2
-    cbet, semi = chart.size('cbet_pot'), chart.size('semi_bluff_pot')
-    nuts_size = chart.size('nuts_pot')
+    semi = chart.bet_frac('draw', street, multiway=multiway, short=short)
+    # Цена колла: в мультипоте нужны чёткие пот-оддсы, с коротким стеком —
+    # наоборот шире (ставок дальше почти не будет, дро увидит обе карты).
+    price_mult = 1.0
+    if multiway and street in ('turn', 'river'):
+        # на флопе дро в мультипоте окупается добором (играют трое), а вот на
+        # терне и ривере против нескольких ставок нужны чёткие пот-оддсы
+        price_mult *= st['multiway_price_mult']
+    if short:
+        price_mult *= st['short_stack_price_mult']
     # Флеш/стрит/фулл: рука сильная по номиналу, но её ранг уже учтён в made —
     # младшим флешем банк не растят, а против крупной ставки считают шансы.
     big_made = cls['category'] is not None and cls['category'] >= he.STRAIGHT
@@ -502,16 +781,21 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
         if big_made and made in ('medium', 'weak'):
             # 19.08 15:49 #21: флеш с шестёркой отвечал коллом на алл-ин как натс.
             # Против алл-ина нас бьёт любая старшая карта масти — решает цена.
-            if (price if price is not None else BLIND_PRICE) < showdown - CALL_MARGIN:
+            if (price if price is not None else BLIND_PRICE) < (showdown - CALL_MARGIN) * price_mult:
                 return _d('call', f'{name}: колл — {_odds_note(price, showdown)}')
             return _d('fold', f'{name}: фолд — {_odds_note(price, showdown)}')
         if made in ('nuts', 'strong'):
             if no_raise:
                 return _d('call', f'{name}: колл против алл-ина — '
                                   f'{_odds_note(price, showdown)} (рейз недоступен)')
-            return _raise_pot(f'{name}: рейз на велью', pot_bb, cbet * 1.5)
+            # при bet_sizing рейз натсом крупнее, без него — как раньше, cbet*1.5
+            kind = made if st['bet_sizing'] else 'strong'
+            return _raise_pot(f'{name}: рейз на велью', pot_bb,
+                              chart.bet_frac(kind, street, multiway=multiway, short=short,
+                                             mult=1.5))
         if made == 'medium':
-            if price is not None and price > st['medium_max_price']:
+            cap = st['medium_max_price'] * price_mult
+            if price is not None and price > cap:
                 return _d('fold', f'{name}: средняя рука, {_odds_note(price, showdown)} — фолд')
             return _d('call', f'{name}: колл со средней рукой, {_odds_note(price, showdown)}')
         if made == 'draw' or draws:
@@ -519,7 +803,7 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
                 # чисел нет: считаем ставку полубанком и рассчитываем дойти до ривера
                 blind_eq = he.equity_from_outs(outs, street)
                 return (_d('call', f'дро {draws}, {outs} аутов (~{blind_eq:.0%}) — колл по аутам')
-                        if blind_eq >= st['draw_min_equity']
+                        if blind_eq >= st['draw_min_equity'] / price_mult
                         else _d('fold', f'дро {draws}: {outs} аутов мало'))
             # На флопе колл покупает ОДНУ карту, а не две: на терне за вторую
             # придётся заплатить снова. Правило 4x тут завышало эквити почти
@@ -531,13 +815,14 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
                                                      st['implied_pot_mult'])
             eff = price if eff is None else eff
             note = '' if eff == price else f' (с имплайд-оддсами, чистая цена {price:.0%})'
-            if equity > eff:
+            need = eff / price_mult
+            if equity > need:
                 return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > '
-                                  f'цены {eff:.0%}{note}')
+                                  f'цены {need:.0%}{note}')
             if street == 'flop' and 'flush' in draws and hu and not no_raise:
                 return _raise_pot(f'сильное дро {draws}: полу-блеф', pot_bb, semi)
-            return _d('fold', f'дро {draws}: {equity:.0%} < цены {eff:.0%}{note}')
-        if price is not None and price < st['cheap_price'] and street != 'river':
+            return _d('fold', f'дро {draws}: {equity:.0%} < цены {need:.0%}{note}')
+        if price is not None and price < st['cheap_price'] * price_mult and street != 'river':
             return _d('call', f'{name}: дёшево ({price:.0%}) — смотрим следующую карту')
         return _d('fold', f'{name}: нечем продолжать')
 
@@ -550,11 +835,28 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
     if made in ('nuts', 'strong'):
         # с непобиваемой рукой ставим крупнее: пресет 75% банка вместо 50%
         return _raise_pot(f'{name}: ставка на велью', pot_bb,
-                          nuts_size if made == 'nuts' else cbet)
+                          chart.bet_frac(made, street, multiway=multiway, short=short))
     if made == 'medium':
-        if street == 'flop':
-            return _raise_pot(f'{name}: конт-бет', pot_bb, cbet * 0.8)
+        # тонкое велью — только там, где его заплатят: не против троих и не без позиции
+        if multiway:
+            return _d('check', f'{name}: не ставим тонко против {players} игроков')
+        if st['position_aware'] and oop and street == 'flop':
+            return _d('check', f'{name}: без позиции — чек вместо конт-бета')
+        if street == 'flop' or (short and street == 'turn'):
+            return _raise_pot(f'{name}: конт-бет', pot_bb,
+                              chart.bet_frac('medium', street, short=short))
         return _d('check', f'{name}: контроль банка на {street}')
+    if street == 'river' and st['blocker_bluff'] and not multiway and made in ('air', 'draw'):
+        # Блеф с блокером: натс-флеша/старшего стрита у оппонента быть не может.
+        # Идёт до разбора дро: на ривере доборной карты нет, «флеш-дро» с тузом
+        # масти — это и есть воздух с блокером. Частоту ограничивает главный
+        # цикл (bluff_ok), иначе бот блефовал бы в каждой такой раздаче.
+        blocker = nut_blocker(hole, board)
+        if blocker and bluff_ok:
+            return _raise_pot(f'блеф с блокером ({blocker})', pot_bb,
+                              st['blocker_bluff_pot'] * st['aggression'])
+        if blocker:
+            return _d('check', f'{name}: блокер {blocker}, но блеф слишком часто — чек')
     if made == 'draw' or draws:
         if street in ('flop', 'turn') and hu:
             return _raise_pot(f'дро {draws} ({outs} аутов): полу-блеф', pot_bb, semi)
@@ -625,8 +927,11 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
                                       stack_bb, chart, no_raise=no_raise)
             made = 'preflop'
         else:
+            # first_to_act == 'me' — говорим первыми, то есть играем без позиции
+            oop = state.get('first_to_act') == 'me'
             decision = decide_postflop(hole, board, street, has_bet, to_call, pot,
-                                       stack_bb, players, chart, no_raise=no_raise)
+                                       stack_bb, players, chart, no_raise=no_raise,
+                                       oop=oop, bluff_ok=state.get('bluff_ok', True))
             made = he.hand_class(hole, board)['made']
     except (he.BadCard, ValueError) as e:
         return _d('check' if not has_bet else 'fold', f'ошибка разбора карт: {e}')
