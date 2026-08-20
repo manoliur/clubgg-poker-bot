@@ -28,7 +28,7 @@ ADB = os.environ.get('CLUBGG_ADB', r'E:/down/platform-tools/platform-tools/adb.e
 # имя -> (serial по умолчанию, описание)
 DEFAULT_DEVICES = [
     {'name': 'Телефон 1', 'serial': '1cf5db29', 'chart': 'charts/6max_standard.json',
-     'aggression': 1.0, 'defense': 1.0, 'stack': 69.6,
+     'aggression': 1.0, 'defense': 1.0, 'stack': 69.6, 'live_stack': True,
      'style': strategy.DEFAULT_STYLE},
 ]
 
@@ -40,6 +40,14 @@ FLAGS = [
     ('blocker_bluff', 'Блеф с блокерами (ривер)'),
     ('position_aware', 'Учитывать позицию (OOP)'),
 ]
+
+# Переключатели самого БОТА (в настройки стратегии не входят, живут только в
+# записи устройства). live_stack: бот читает свой стек с экрана раз в раздачу и
+# сам обновляет поле stack; выключено — играет по числу из панели, как раньше.
+BOT_FLAGS = [
+    ('live_stack', 'Живой стек — читать с экрана'),
+]
+BOT_FLAG_KEYS = [f[0] for f in BOT_FLAGS]
 
 # Ползунки порогов: ключ, подпись, min, max, шаг.
 SLIDERS = [
@@ -60,6 +68,8 @@ FLAG_KEYS = [f[0] for f in FLAGS]
 # процессы ботов
 # ---------------------------------------------------------------------------
 class BotManager:
+    _mtime = None             # mtime devices.json на момент последнего чтения/записи
+
     def __init__(self):
         self.procs = {}       # serial -> Popen
         self.log_files = {}   # serial -> file handle
@@ -113,15 +123,37 @@ class BotManager:
             try:
                 with open(DEVICES_FILE, encoding='utf-8') as f:
                     self.devices = json.load(f)
+                self._mtime = self._file_mtime()
                 return
             except (OSError, ValueError):
                 pass
         self.devices = [dict(d) for d in DEFAULT_DEVICES]   # копия: записи правятся на месте
         self.save_devices()
 
+    @staticmethod
+    def _file_mtime():
+        try:
+            return os.path.getmtime(DEVICES_FILE)
+        except OSError:
+            return None
+
+    def reload_if_changed(self):
+        """Перечитать devices.json, если его правил кто-то ещё.
+
+        Этот «кто-то» — бот: он пишет в свою запись прочитанный с экрана стек.
+        Без перечитывания панель показывала бы значение, снятое при её запуске, а
+        первое же «Применить» вернуло бы в файл устаревшую константу.
+        """
+        mtime = self._file_mtime()
+        if mtime is None or mtime == getattr(self, '_mtime', None):
+            return False
+        self.load_devices()
+        return True
+
     def save_devices(self):
         with open(DEVICES_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.devices, f, ensure_ascii=False, indent=2)
+        self._mtime = self._file_mtime()
 
     def device(self, serial):
         for d in self.devices:
@@ -146,6 +178,7 @@ class BotManager:
         return p is not None and p.poll() is None
 
     def status(self, serial):
+        self.reload_if_changed()      # бот мог обновить свой стек в файле
         d = self.device(serial) or {}
         online = serial in self.adb_online()
         run = self.running(serial)
@@ -153,12 +186,17 @@ class BotManager:
         # что реально применит бот: стиль + отдельные ключи записи (без ползунков —
         # их множители применяются поверх и в поля панели попадать не должны)
         settings = strategy.device_settings(strategy.DEFAULT_SETTINGS, d, sliders=False)
+        flags = {k: bool(settings[k]) for k in FLAG_KEYS}
+        # переключатели бота живут прямо в записи устройства (в стратегию не идут)
+        flags.update({k: bool(d.get(k, True)) for k in BOT_FLAG_KEYS})
         return {'serial': serial, 'name': d.get('name', serial),
                 'online': online, 'running': run,
                 'chart': d.get('chart'), 'aggression': d.get('aggression', 1.0),
                 'defense': d.get('defense', 1.0), 'stack': d.get('stack', 69.6),
+                # стек прочитан ботом с экрана, а не задан человеком
+                'stack_auto': bool(d.get('stack_auto')),
                 'style': str(d.get('style') or strategy.DEFAULT_STYLE).lower(),
-                'flags': {k: bool(settings[k]) for k in FLAG_KEYS},
+                'flags': flags,
                 'sliders': {k: settings[k] for k in SLIDER_KEYS},
                 'log': tail}
 
@@ -193,6 +231,8 @@ class BotManager:
         cmd += ['--defense', str(d.get('defense', 1.0))]
         cmd += ['--stack', str(d.get('stack', 69.6))]
         cmd += ['--style', str(d.get('style') or strategy.DEFAULT_STYLE)]
+        if not d.get('live_stack', True):
+            cmd += ['--no-live-stack']
         if d.get('name'):
             cmd += ['--name', d['name']]
         f = open(log_path, 'a', encoding='utf-8')
@@ -238,6 +278,7 @@ class BotManager:
         Кривые значения (чужой стиль, буквы вместо числа) молча пропускаем:
         панель не должна писать в devices.json то, на чём бот споткнётся.
         """
+        self.reload_if_changed()          # бот мог обновить стек, пока правили форму
         d = self.device(serial)
         if d is None:
             d = {'serial': serial, 'name': serial}
@@ -245,10 +286,14 @@ class BotManager:
         for key in ('name', 'chart', 'aggression', 'defense', 'stack'):
             if key in data:
                 d[key] = data[key]
+        if 'stack' in data:
+            # стек ввёл человек — с этого момента он не «авто», и бот считает от
+            # него границы здравого чтения (пока сам не прочитает новое значение)
+            d['stack_auto'] = False
         style = str(data.get('style', '')).lower().strip()
         if style in strategy.STYLE_PRESETS:
             d['style'] = style
-        for key in FLAG_KEYS:
+        for key in FLAG_KEYS + BOT_FLAG_KEYS:
             if key in data:
                 d[key] = bool(data[key])
         for key in SLIDER_KEYS:
@@ -294,6 +339,7 @@ PAGE = """<!DOCTYPE html>
  pre.log{background:#0c1014;border:1px solid #2c3644;border-radius:8px;padding:8px;
   font-size:12px;max-height:180px;overflow:auto;white-space:pre-wrap;color:#9fe8a0}
  .hint{font-size:12px;color:#6f8299;margin-top:6px}
+ .hint.auto{margin:0;color:#9fe8a0}
  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px 14px}
  .cell{display:flex;gap:8px;align-items:center}
  .cell label{flex:1 0 150px}
@@ -329,6 +375,7 @@ async function refresh(){
      <select data-k="style">${Object.entries(data.styles||{}).map(([k,s]) =>
        `<option value="${k}" ${d.style===k?'selected':''}>${s.title}</option>`).join('')}</select>
      <label>Стек, ББ</label><input type="number" data-k="stack" step="0.1" value="${d.stack}" style="width:70px">
+     <span class="hint auto">${d.stack_auto?`стек: ${d.stack} ББ (авто)`:'стек задан вручную'}</span>
    </div>
    <div class="row">
      <label>Агрессия</label><input type="range" data-k="aggression" min="0.5" max="2" step="0.1" value="${d.aggression}">
@@ -416,9 +463,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, PAGE, 'text/html')
             return
         if u.path == '/api/devices':
+            MANAGER.reload_if_changed()      # бот пишет сюда живой стек
             devices = [MANAGER.status(d['serial']) for d in MANAGER.devices]
             self._send(200, {'devices': devices, 'charts': MANAGER.charts(),
-                             'styles': MANAGER.styles(), 'flags': FLAGS,
+                             'styles': MANAGER.styles(), 'flags': FLAGS + BOT_FLAGS,
                              'sliders': SLIDERS, 'total': len(devices)})
             return
         self._send(404, {'error': 'not found'})

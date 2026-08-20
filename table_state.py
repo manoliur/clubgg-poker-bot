@@ -7,6 +7,7 @@
     find_dealer(img)     -> где кнопка D ('me' / 'opp' / номер места по кругу)
     count_players(img)   -> сколько игроков в раздаче (2..6)
     read_number(img, ..) -> число (банк, сумма колла), если собраны эталоны цифр
+    read_own_stack(img)  -> свой стек в ББ с плашки героя (или None)
 
 Игроки (2..6) ищутся по плашкам мест: у занятого места клиент подписывает стек
 голубым («259 ББ»). Плашки упорядочиваются по часовой стрелке вокруг центра
@@ -34,6 +35,10 @@ POSITIONS_6MAX = ['BTN', 'SB', 'BB', 'UTG', 'MP', 'CO']
 CANON_DIGIT = (20, 28)
 DIGIT_MIN_AREA = 12         # площадь символа на эталонном экране 1080x2400
 DIGIT_MIN_SCORE = 0.45      # порог уверенности для эталона цифры
+CRUMB_FRAC = 0.04           # мельче этой доли самого крупного бокса — не символ
+STACK_CRUMB_FRAC = 0.03     # у подписи стека — мягче (см. read_own_stack)
+STACK_MIN_BB = 0.1          # меньше — не стек, а мусор в зоне
+STACK_MAX_BB = 100000.0     # верхняя граница здравого смысла
 
 
 # --------------------------------------------------------------------------
@@ -82,8 +87,17 @@ def amber_mask(bgr):
 
 
 def stack_ink_mask(bgr):
-    """Голубые цифры стека («240.3 ББ») — тот же шрифт, что у жёлтых сумм."""
-    return stack_mask(bgr)
+    """Голубые ЦИФРЫ стека («240.3 ББ») — маска для чтения, не для поиска плашек.
+
+    stack_mask (пороги по каналам) для чтения не годится по той же причине, что
+    yellow_mask для жёлтых сумм: она оставляет только ядро глифа и теряет тусклую
+    десятичную точку — «118.4 ББ» читается как 1184. Здесь тон/насыщенность
+    (HSV): тело цифры в клиенте — бирюзовое (b,g,r)=(220,211,121), тон ~93.
+    Нижняя граница V=135 подобрана по 32 живым кадрам (shots_stack/): ниже маска
+    склеивает соседние цифры в один глиф, выше — рассыпается точка.
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv, (75, 45, 135), (110, 255, 255))
 
 
 INK_MASKS = {'yellow': yellow_mask, 'bright': bright_mask, 'gold': gold_mask,
@@ -481,7 +495,7 @@ def dealer_seat(x, y, img, panels=None):
 # --------------------------------------------------------------------------
 # чтение чисел (банк, сумма колла) — при наличии эталонов цифр
 # --------------------------------------------------------------------------
-def segment_text_glyphs(img, rect, ink='amber'):
+def segment_text_glyphs(img, rect, ink='amber', min_frac=CRUMB_FRAC):
     """Глифы текста в прямоугольнике: [(x, нормализованный глиф)] слева направо.
 
     Куски одного символа склеиваются по колонкам: на сжатых кадрах (jpeg с
@@ -489,6 +503,11 @@ def segment_text_glyphs(img, rect, ink='amber'):
     Порог площади масштабируется по размеру кадра — иначе точка в «1.5» на
     кадре 540px (9 px) не проходит порог, снятый с эталонных 1080px, и число
     читается как «15».
+
+    min_frac — доля площади самого крупного бокса, ниже которой символ считается
+    крапиной от сжатия. Для подписи стека её приходится опускать (см.
+    read_own_stack): там две буквы «ББ» иногда слипаются в один широкий бокс и
+    завышают эталон, из-за чего отсеивается десятичная точка.
     """
     crop, _ = _crop(img, rect)
     if crop.size == 0:
@@ -507,7 +526,7 @@ def segment_text_glyphs(img, rect, ink='amber'):
     for x, y, w, h in boxes:
         if h < 0.25 * max_h and w > 0.9 * max_h:
             continue                             # длинная черта/подчёркивание
-        if w * h < 0.04 * max_area:              # крапина от сжатия, не символ
+        if w * h < min_frac * max_area:          # крапина от сжатия, не символ
             continue
         out.append((int(x), card_reader._norm_glyph(mask, (x, y, w, h), CANON_DIGIT)))
     return out
@@ -542,7 +561,8 @@ def load_digit_templates(tpl_dir=None):
     return digits
 
 
-def read_number(img, rect, ink='amber', digits=None, tpl_dir=None):
+def read_number(img, rect, ink='amber', digits=None, tpl_dir=None,
+                min_frac=CRUMB_FRAC):
     """Прочитать число в зоне. Без эталонов цифр возвращает None.
 
     Числу в клиенте всегда сопутствует подпись «ББ» тем же шрифтом и цветом,
@@ -553,7 +573,7 @@ def read_number(img, rect, ink='amber', digits=None, tpl_dir=None):
     digits = load_digit_templates(tpl_dir) if digits is None else digits
     if not any(k.isdigit() for k in digits):
         return None
-    glyphs = segment_text_glyphs(img, rect, ink)
+    glyphs = segment_text_glyphs(img, rect, ink, min_frac)
     if not glyphs:
         return None
     text = ''
@@ -568,6 +588,37 @@ def read_number(img, rect, ink='amber', digits=None, tpl_dir=None):
         return float(text)
     except ValueError:
         return None
+
+
+def read_own_stack(img, digits=None, tpl_dir=None):
+    """Свой стек в ББ (float) с плашки героя или None, если не прочитан.
+
+    Читается ТОЛЬКО своя сумма: плашка героя стоит внизу слева на фиксированном
+    месте (config.HERO_STACK_ZONE), чужие подписи лежат по кругу выше и в зону не
+    попадают. Искать «свою» плашку по подсветке хода нельзя: клиент подсвечивает
+    того, чей ход, а стек нужен и когда думает оппонент.
+
+    Кадр меньше эталонного (бот жмёт скриншоты до 400px) сначала растягивается до
+    1080 по ширине: подпись стека вдвое мельче банка, и на сжатом jpeg её глифы
+    садятся на 0.37-0.44 уверенности — ниже порога DIGIT_MIN_SCORE. После
+    растяжения те же кадры читаются на 0.69-0.87.
+
+    Возвращает None при любом сомнении (нет эталонов, мутный глиф, значение вне
+    здравых границ) — вызывающий остаётся на прежнем стеке.
+    """
+    H, W = img.shape[:2]
+    x0, y0, x1, y1 = config.zone_px(config.HERO_STACK_ZONE, W, H)
+    crop = img[max(0, y0):min(H, y1), max(0, x0):min(W, x1)]
+    if crop.size == 0:
+        return None
+    k = config.REF_W / W
+    if k > 1.05:
+        crop = cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC)
+    value = read_number(crop, (0.0, 0.0, 1.0, 1.0), 'stack', digits, tpl_dir,
+                        min_frac=STACK_CRUMB_FRAC)
+    if value is None or not STACK_MIN_BB <= value <= STACK_MAX_BB:
+        return None
+    return value
 
 
 def call_amount_fp(img):

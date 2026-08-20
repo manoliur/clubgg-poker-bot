@@ -234,9 +234,25 @@ def draw_chevron(img):
     cv2.line(img, (cx, cy - arm // 2), (cx + arm, cy + arm // 2), YELLOW, thick)
 
 
+def draw_hero_stack(img, text):
+    """Свой стек шрифтом клиента в config.HERO_STACK_ZONE («118.4 ББ»).
+
+    draw_seat пишет сумму шрифтом cv2 — по нему находятся плашки мест, но
+    прочитать его эталонами цифр нельзя. Для проверки read_own_stack поверх
+    плашки героя рисуется настоящая подпись: глифы из templates/digit_*.png тем
+    же голубым, что и в клиенте.
+    """
+    H, W = img.shape[:2]
+    x0, y0, x1, y1 = config.zone_px(config.HERO_STACK_ZONE, W, H)
+    cv2.rectangle(img, (x0, y0), (x1, y1), PANEL, -1)     # чистим место под сумму
+    height = max(10, int((y1 - y0) * 0.55))
+    return draw_amount(img, ((x0 + x1) // 2, (y0 + y1) // 2), f'{text} BB',
+                       height, CYAN)
+
+
 def render(hole=None, board=None, buttons=True, call_amount=False,
            dealer='me', players=2, sitting_out=0, pot_bb=3.0, presets=0,
-           dim_presets=(), chevron=False, showdown=False,
+           dim_presets=(), chevron=False, showdown=False, hero_stack=None,
            size=(config.REF_W, config.REF_H)):
     """Собрать кадр. hole/board — списки строк карт ('Ah'), None = рубашка.
 
@@ -254,6 +270,8 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
     свёрнутый столбец, который бот должен сначала раскрыть.
     showdown=True — вскрытие: вместо кнопок действий ряд плашек «Показать» с
     лицами карт.
+    hero_stack — своя сумма ('61.2') шрифтом клиента в зоне config.HERO_STACK_ZONE;
+    None — плашка героя как раньше (шрифт cv2, эталонами не читается).
     """
     W, H = size
     img = np.zeros((H, W, 3), np.uint8)
@@ -287,6 +305,9 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
         draw_seat(img, seat, stack='259' if playing else '0', cards=playing,
                   name=f'Opp{i}')
     draw_seat(img, config.HERO_SEAT, stack='59.8', cards=False, name='Hero')
+    # свою сумму пишем ещё раз шрифтом клиента: иначе read_own_stack читает
+    # глифы cv2 как попало («59.8» -> 69.8), чего на живом кадре не бывает
+    draw_hero_stack(img, '59.8' if hero_stack is None else hero_stack)
 
     # доска — поверх панелей: на реальном столе карты лежат на сукне и панели
     # игроков их не закрывают (крайние места у config.SEATS заходят на зону доски)
