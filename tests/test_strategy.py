@@ -204,6 +204,32 @@ class AllInDefenceTest(unittest.TestCase):
         d = self.hand(to_call_bb=0.5, pot_bb=1.5)
         self.assertEqual(d['action'], 'raise', d['reason'])
 
+    def test_three_bet_range_not_applied_against_4bet(self):
+        """AQ против 4-бета — фолд, а не «3-бет на велью» (5-бет).
+
+        Живой кейс 20.08: пользователь с AA рейзит, бот с AQ «на велью»
+        отвечал 3-бетом и доходил до алл-ина. Против 3-бета+ диапазон
+        3-бета не применяется: 4-бет только QQ+/AK, колл 3-бета только
+        премиум, против 4-бета премиум без монстра тоже пасует.
+        """
+        # AQs против 4-бета 20ББ — фолд (был 5-бет «3-бет на велью»)
+        d = self.hand(hole=['As', 'Qs'], to_call_bb=20.0, pot_bb=32.0)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('4-бета', d['reason'])
+        # AQo против обычного 3-бета — фолд
+        d = self.hand(hole=['As', 'Qh'], to_call_bb=8.0, pot_bb=12.0)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        # AQs против обычного 3-бета — колл премиумом
+        d = self.hand(hole=['As', 'Qs'], to_call_bb=8.0, pot_bb=12.0)
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertIn('премиум', d['reason'])
+        # монстр 4-бетит
+        d = self.hand(hole=['Ks', 'Kd'], to_call_bb=20.0, pot_bb=32.0)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        # 3-бет против обычного открытия остаётся законным
+        d = self.hand(hole=['As', 'Qh'], to_call_bb=2.5, pot_bb=4.5)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+
     def test_suited_connector_folds_to_all_in(self):
         """09:52:27 — 4-бет/алл-ин 23.7ББ: это уже колл/фолд, а не 3-бет."""
         d = self.hand()

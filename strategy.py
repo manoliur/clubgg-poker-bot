@@ -671,6 +671,12 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
     # по чарту нельзя. Живая раздача 19.08 09:52: 76s ответила 3-бетом на
     # алл-ин, рейзить было нечем, и тап выродился в колл 23.7ББ (34% стека).
     big = to_call_bb is not None and stack_bb and to_call_bb > cap * stack_bb
+    # Перед нами 3-бет или крупнее (ставка заметно больше открытия ~2.5ББ)?
+    # Тогда диапазон 3-бета НЕ применяется: 5-бетить AQ нельзя — у оппонента,
+    # дошедшего до 4-бета, диапазон QQ+/AK. Живой кейс: AQ «на велью» против
+    # 4-бета доходил до алл-ина против карманных тузов. Против 3-бета+ играем
+    # только монстрами (4-бет QQ+/AK) и премиумом (колл JJ+/AQs+), остальное — фолд.
+    is_3bet = to_call_bb is not None and to_call_bb > (st.get('open_size_bb') or 2.5) * 1.6
     if not no_raise and not (big and not premium):
         if in_range(hole, chart.four_bet):
             if short:
@@ -678,6 +684,20 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
                           stack_bb, pot_frac=1.0)
             return _d('raise', f'{code}: премиум — 4-бет/олл-ин',
                       max(open_size * 3, (to_call_bb or open_size) * mult))
+        if is_3bet and not short:
+            if premium:
+                # против 4-бета (ставка от ~4x открытия) премиум без монстра пасует:
+                # 4-беттер держит QQ+/AK, AQs там ~30% эквити
+                if to_call_bb > (st.get('open_size_bb') or 2.5) * 4:
+                    return _d('fold', f'{code}: фолд против 4-бета — '
+                                      f'{_odds_note(price, 0.30)}')
+                if big and price is not None and price >= st['big_bet_price']:
+                    return _d('fold', f'{code}: премиум, но цена {price:.0%} против '
+                                      f'3-бета+ — фолд')
+                return _d('call', f'{code}: колл 3-бета+ с премиум-рукой'
+                          + (f' — {_odds_note(price, 0.40)}' if price is not None else ''))
+            return _d('fold', f'{code}: фолд против 3-бета+'
+                      + (f' — {_odds_note(price, 0.25)}' if price is not None else ''))
         if in_range(hole, value3bet):
             if short:
                 return _d('raise', f'{code}: алл-ин {stack_bb:.0f}ББ вместо 3-бета{note}',
