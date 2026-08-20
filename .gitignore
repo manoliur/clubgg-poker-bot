@@ -8,3 +8,5 @@ claude_log.jsonl
 debug/
 shots_audit/
 shots_digits/
+devices.json
+logs/

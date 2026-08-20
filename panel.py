@@ -16,6 +16,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strategy                    # noqa: E402  (свой модуль, сторонних библиотек нет)
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 DEVICES_FILE = os.path.join(BASE, 'devices.json')
 LOGS_DIR = os.path.join(BASE, 'logs')
@@ -25,8 +28,33 @@ ADB = os.environ.get('CLUBGG_ADB', r'E:/down/platform-tools/platform-tools/adb.e
 # имя -> (serial по умолчанию, описание)
 DEFAULT_DEVICES = [
     {'name': 'Телефон 1', 'serial': '1cf5db29', 'chart': 'charts/6max_standard.json',
-     'aggression': 1.0, 'defense': 1.0, 'stack': 69.6},
+     'aggression': 1.0, 'defense': 1.0, 'stack': 69.6,
+     'style': strategy.DEFAULT_STYLE},
 ]
+
+# Переключатели «вкл/выкл»: ключ -> подпись в панели.
+FLAGS = [
+    ('bet_sizing', 'Размеры ставок по силе/улице'),
+    ('multiway_tight', 'Мультипот — тайтовее'),
+    ('short_stack_mode', 'Короткий стек — push/fold'),
+    ('blocker_bluff', 'Блеф с блокерами (ривер)'),
+    ('position_aware', 'Учитывать позицию (OOP)'),
+]
+
+# Ползунки порогов: ключ, подпись, min, max, шаг.
+SLIDERS = [
+    ('cbet_pot', 'Ставка велью', 0.3, 1.0, 0.05),
+    ('nuts_pot', 'Ставка натсом', 0.4, 1.0, 0.05),
+    ('medium_max_price', 'Порог колла средней', 0.1, 0.7, 0.02),
+    ('draw_min_equity', 'Эквити дро', 0.20, 0.50, 0.01),
+    ('short_stack_bb', 'Короткий стек, ББ', 10, 60, 1),
+    ('bet_nuts', 'Размер: натс', 0.4, 1.0, 0.05),
+    ('bet_strong', 'Размер: сильная', 0.3, 1.0, 0.05),
+    ('bet_medium', 'Размер: средняя', 0.2, 0.9, 0.05),
+    ('bet_draw', 'Размер: дро', 0.2, 0.9, 0.05),
+]
+SLIDER_KEYS = [s[0] for s in SLIDERS]
+FLAG_KEYS = [f[0] for f in FLAGS]
 
 # ---------------------------------------------------------------------------
 # процессы ботов
@@ -88,7 +116,7 @@ class BotManager:
                 return
             except (OSError, ValueError):
                 pass
-        self.devices = DEFAULT_DEVICES
+        self.devices = [dict(d) for d in DEFAULT_DEVICES]   # копия: записи правятся на месте
         self.save_devices()
 
     def save_devices(self):
@@ -122,11 +150,24 @@ class BotManager:
         online = serial in self.adb_online()
         run = self.running(serial)
         tail = self.tail(serial, 6)
+        # что реально применит бот: стиль + отдельные ключи записи (без ползунков —
+        # их множители применяются поверх и в поля панели попадать не должны)
+        settings = strategy.device_settings(strategy.DEFAULT_SETTINGS, d, sliders=False)
         return {'serial': serial, 'name': d.get('name', serial),
                 'online': online, 'running': run,
                 'chart': d.get('chart'), 'aggression': d.get('aggression', 1.0),
                 'defense': d.get('defense', 1.0), 'stack': d.get('stack', 69.6),
+                'style': str(d.get('style') or strategy.DEFAULT_STYLE).lower(),
+                'flags': {k: bool(settings[k]) for k in FLAG_KEYS},
+                'sliders': {k: settings[k] for k in SLIDER_KEYS},
                 'log': tail}
+
+    @staticmethod
+    def styles():
+        """Пресеты для выпадашки: подпись + пороги (по ним панель освежает ползунки)."""
+        return {key: {'title': strategy.STYLE_TITLES.get(key, key),
+                      'sliders': {k: strategy.style_settings(key)[k] for k in SLIDER_KEYS}}
+                for key in strategy.STYLE_PRESETS}
 
     def tail(self, serial, n=6):
         path = os.path.join(LOGS_DIR, f'{serial}.log')
@@ -151,6 +192,7 @@ class BotManager:
         cmd += ['--aggression', str(d.get('aggression', 1.0))]
         cmd += ['--defense', str(d.get('defense', 1.0))]
         cmd += ['--stack', str(d.get('stack', 69.6))]
+        cmd += ['--style', str(d.get('style') or strategy.DEFAULT_STYLE)]
         if d.get('name'):
             cmd += ['--name', d['name']]
         f = open(log_path, 'a', encoding='utf-8')
@@ -191,6 +233,11 @@ class BotManager:
         return True, 'остановлен'
 
     def save_config(self, serial, data):
+        """Сохранить настройки устройства. Бот подхватит их со следующего решения.
+
+        Кривые значения (чужой стиль, буквы вместо числа) молча пропускаем:
+        панель не должна писать в devices.json то, на чём бот споткнётся.
+        """
         d = self.device(serial)
         if d is None:
             d = {'serial': serial, 'name': serial}
@@ -198,6 +245,18 @@ class BotManager:
         for key in ('name', 'chart', 'aggression', 'defense', 'stack'):
             if key in data:
                 d[key] = data[key]
+        style = str(data.get('style', '')).lower().strip()
+        if style in strategy.STYLE_PRESETS:
+            d['style'] = style
+        for key in FLAG_KEYS:
+            if key in data:
+                d[key] = bool(data[key])
+        for key in SLIDER_KEYS:
+            if key in data:
+                try:
+                    d[key] = float(data[key])
+                except (TypeError, ValueError):
+                    pass
         self.save_devices()
         return d
 
@@ -235,59 +294,100 @@ PAGE = """<!DOCTYPE html>
  pre.log{background:#0c1014;border:1px solid #2c3644;border-radius:8px;padding:8px;
   font-size:12px;max-height:180px;overflow:auto;white-space:pre-wrap;color:#9fe8a0}
  .hint{font-size:12px;color:#6f8299;margin-top:6px}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px 14px}
+ .cell{display:flex;gap:8px;align-items:center}
+ .cell label{flex:1 0 150px}
+ .val{font-size:12px;color:#ffd75e;min-width:34px;text-align:right}
+ .flags label{color:#e8e8e8;display:flex;gap:6px;align-items:center;cursor:pointer}
+ .dirty{color:#ffd75e}
 </style></head><body><div class="wrap">
 <h1>🎰 ClubGG — панель управления ботами</h1>
 <div id="list"></div>
-<div class="hint">Автообновление каждые 3с. Настройки применяются при следующем старте бота.</div>
+<div class="hint">Автообновление каждые 3с. «Применить» действует сразу — бот
+перечитывает настройки перед каждым решением, перезапуск не нужен.</div>
 </div>
 <script>
+let editing = null;          // пока правим настройки — не перерисовываем список
 async function api(path, method, body){
   const r = await fetch(path, {method, headers:{'Content-Type':'application/json'},
     body: body?JSON.stringify(body):undefined});
   return r.json();
 }
+function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 async function refresh(){
+  if (editing) return;       // иначе автообновление сотрёт несохранённые правки
   const data = await api('/api/devices');
   const el = document.getElementById('list');
   el.innerHTML = (data.devices||[]).map(d => `
-   <div class="dev" data-serial="${d.serial}"><h2>${d.name||d.serial}
+   <div class="dev" data-serial="${d.serial}"><h2>${esc(d.name)||d.serial}
      <span class="badge ${d.online?'on':'off'}">${d.online?'в сети':'нет связи'}</span>
      <span class="badge ${d.running?'on':'off'}">${d.running?'ИГРАЕТ':'остановлен'}</span></h2>
    <div class="row"><label>Чарт</label>
      <select data-k="chart">${(data.charts||[]).map(c =>
        `<option ${d.chart==='charts/'+c?'selected':''}>charts/${c}</option>`).join('')}</select>
-     <label>Агрессия</label><input type="range" data-k="aggression" min="0.5" max="2" step="0.1" value="${d.aggression}">
-     <span id="agg_${d.serial}">${d.aggression}</span>
-     <label>Защита</label><input type="range" data-k="defense" min="0.5" max="2" step="0.1" value="${d.defense}">
-     <span id="def_${d.serial}">${d.defense}</span>
+     <label>Стиль</label>
+     <select data-k="style">${Object.entries(data.styles||{}).map(([k,s]) =>
+       `<option value="${k}" ${d.style===k?'selected':''}>${s.title}</option>`).join('')}</select>
+     <label>Стек, ББ</label><input type="number" data-k="stack" step="0.1" value="${d.stack}" style="width:70px">
    </div>
+   <div class="row">
+     <label>Агрессия</label><input type="range" data-k="aggression" min="0.5" max="2" step="0.1" value="${d.aggression}">
+     <span class="val">${d.aggression}</span>
+     <label>Защита</label><input type="range" data-k="defense" min="0.5" max="2" step="0.1" value="${d.defense}">
+     <span class="val">${d.defense}</span>
+   </div>
+   <div class="row flags grid">${(data.flags||[]).map(([k,title]) =>
+     `<label><input type="checkbox" data-k="${k}" ${d.flags[k]?'checked':''}>${title}</label>`).join('')}</div>
+   <div class="grid">${(data.sliders||[]).map(([k,title,lo,hi,step]) =>
+     `<div class="cell"><label>${title}</label>
+       <input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${step}" value="${d.sliders[k]}">
+       <span class="val">${d.sliders[k]}</span></div>`).join('')}</div>
    <div class="row">
      <button class="go" data-a="start" ${d.running?'disabled':''}>▶ Старт</button>
      <button class="stop" data-a="stop" ${d.running?'':'disabled'}>■ Стоп</button>
-     <button data-a="save">💾 Сохранить настройки</button>
+     <button data-a="save">💾 Применить</button>
+     <span class="hint state">применяется сразу, без перезапуска</span>
    </div>
-   <pre class="log">${(d.log||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre>
+   <pre class="log">${esc(d.log)}</pre>
   </div>`).join('');
-  document.querySelectorAll('.dev').forEach(dev => {
-    const serial = dev.dataset.serial;
-    dev.querySelectorAll('button[data-a]').forEach(b => {
-      b.dataset.serial = serial;
-      b.onclick = async () => {
-        if (b.dataset.a === 'save'){
-          const cfg = {serial, name: dev.querySelector('h2').textContent.trim()};
-          dev.querySelectorAll('[data-k]').forEach(i => {
-            cfg[i.dataset.k] = i.tagName==='SELECT' ? i.value : parseFloat(i.value);
-          });
-          await api('/api/device/'+serial+'/config', 'POST', cfg);
-        } else {
-          await api('/api/device/'+serial+'/'+b.dataset.a, 'POST', {});
-        }
-        refresh();
-      };
+  document.querySelectorAll('.dev').forEach(dev => setup(dev, data));
+}
+function setup(dev, data){
+  const serial = dev.dataset.serial;
+  const state = dev.querySelector('.state');
+  const touch = () => { editing = serial; state.textContent = 'не сохранено — нажмите «Применить»';
+                        state.classList.add('dirty'); };
+  dev.querySelectorAll('input[type=range]').forEach(r => {
+    r.oninput = () => { r.nextElementSibling.textContent = r.value; touch(); };
+  });
+  dev.querySelectorAll('input[type=checkbox],input[type=number]').forEach(i => i.onchange = touch);
+  const style = dev.querySelector('[data-k=style]');
+  style.onchange = () => {           // стиль перезаписывает связанные пороги
+    const preset = (data.styles[style.value]||{}).sliders||{};
+    dev.querySelectorAll('.cell input[type=range]').forEach(r => {
+      if (preset[r.dataset.k] !== undefined){
+        r.value = preset[r.dataset.k];
+        r.nextElementSibling.textContent = r.value;
+      }
     });
-    dev.querySelectorAll('input[type=range]').forEach(r => {
-      r.oninput = () => document.getElementById((r.dataset.k==='aggression'?'agg_':'def_')+serial).textContent = r.value;
-    });
+    touch();
+  };
+  dev.querySelector('[data-k=chart]').onchange = touch;
+  dev.querySelectorAll('button[data-a]').forEach(b => {
+    b.onclick = async () => {
+      if (b.dataset.a === 'save'){
+        const cfg = {serial};
+        dev.querySelectorAll('[data-k]').forEach(i => {
+          cfg[i.dataset.k] = i.type==='checkbox' ? i.checked
+                           : i.tagName==='SELECT' ? i.value : parseFloat(i.value);
+        });
+        await api('/api/device/'+serial+'/config', 'POST', cfg);
+      } else {
+        await api('/api/device/'+serial+'/'+b.dataset.a, 'POST', {});
+      }
+      editing = null;
+      refresh();
+    };
   });
 }
 setInterval(refresh, 3000);
@@ -318,7 +418,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == '/api/devices':
             devices = [MANAGER.status(d['serial']) for d in MANAGER.devices]
             self._send(200, {'devices': devices, 'charts': MANAGER.charts(),
-                             'total': len(devices)})
+                             'styles': MANAGER.styles(), 'flags': FLAGS,
+                             'sliders': SLIDERS, 'total': len(devices)})
             return
         self._send(404, {'error': 'not found'})
 

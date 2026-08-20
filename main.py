@@ -82,12 +82,24 @@ class Bot:
     PRESET_FRAC_TOL = 0.2    # ближе этого к нужной доле банка — размер устраивает
 
     def __init__(self, screen, dry_run=False, stack_bb=69.6, players_db=None,
-                 tpl_dir=None, log_path=None, history_path=None, chart=None):
+                 tpl_dir=None, log_path=None, history_path=None, chart=None,
+                 serial=None, devices_path=None, cfg=None):
         self.screen = screen
         self.dry_run = dry_run
         self.stack_bb = stack_bb
         self.players_db = players_db or {}
-        self.chart = chart or strategy.active_chart()
+        # копия: настройки меняются на лету (панель), чарт по умолчанию — общий на процесс
+        self.chart = (chart or strategy.active_chart()).copy()
+        # база, поверх которой каждый раз собираются стиль и ползунки: применять
+        # их к уже применённым настройкам нельзя — множители «уползали» бы
+        self.base_settings = dict(self.chart.settings)
+        self.serial = serial
+        self.devices_path = devices_path or config.DEVICES_FILE
+        self.cli_cfg = dict(cfg or {})       # настройки из ключей запуска (запасные)
+        self._cfg_mtime = None
+        self._blocker_spots = 0              # счётчик ситуаций для блефа с блокером
+        self._bluff_key = self._bluff_last = None
+        self.apply_config(self.cli_cfg, quiet=True)
         self.tpl_dir = tpl_dir
         self.log_path = log_path or config.LOG_FILE
         self.history_path = history_path or config.HAND_HISTORY
@@ -214,7 +226,73 @@ class Bot:
         """
         return any(p['enabled'] for p in (state.get('raise_presets') or []))
 
+    # ---------- настройки на лету ----------
+    def apply_config(self, cfg, quiet=False):
+        """Применить запись устройства: стиль -> отдельные ключи -> ползунки.
+
+        Всегда собирается от base_settings, поэтому повторное применение той же
+        записи ничего не меняет, а снятая галочка возвращается к чарту.
+        """
+        settings = strategy.device_settings(self.base_settings, cfg)
+        changed = [k for k, v in settings.items() if self.chart.settings.get(k) != v]
+        self.chart.settings = settings
+        stack = cfg.get('stack')
+        if stack:
+            try:
+                self.stack_bb = float(stack)
+            except (TypeError, ValueError):
+                pass
+        if changed and not quiet:
+            shown = ', '.join(f'{k}={settings[k]}' for k in sorted(changed)[:8])
+            self.log(f'настройки обновлены (стиль {cfg.get("style") or strategy.DEFAULT_STYLE}): '
+                     f'{shown}' + (' …' if len(changed) > 8 else ''))
+        return changed
+
+    def refresh_settings(self):
+        """Перечитать devices.json, если файл изменился (сверка по mtime — дёшево).
+
+        Вызывается перед каждым РЕШЕНИЕМ, а не на каждом кадре: панель сохраняет
+        настройки — бот подхватывает их со следующего хода, без перезапуска.
+        """
+        if not self.serial:
+            return False
+        try:
+            mtime = os.path.getmtime(self.devices_path)
+        except OSError:
+            return False
+        if mtime == self._cfg_mtime:
+            return False
+        self._cfg_mtime = mtime
+        try:
+            with open(self.devices_path, encoding='utf-8') as f:
+                devices = json.load(f)
+        except (OSError, ValueError) as e:
+            self.log(f'devices.json не прочитан ({e}) — играю на прежних настройках')
+            return False
+        record = next((d for d in devices if isinstance(d, dict)
+                       and d.get('serial') == self.serial), None)
+        if record is None:
+            return False
+        return bool(self.apply_config({**self.cli_cfg, **record}))
+
+    def bluff_ok(self, state):
+        """Разрешён ли блеф с блокером в этой ситуации: не чаще одной из N.
+
+        Ситуация считается один раз на раздачу и улицу: за один ход стратегию
+        могут спросить дважды (раскрытие столбца, недоступный рейз).
+        """
+        key = (self.hand_id, state['street'], tuple(state['board']))
+        if key != self._bluff_key:
+            every = max(1, int(self.chart.settings['blocker_bluff_every']))
+            self._bluff_key = key
+            self._bluff_last = self._blocker_spots % every == 0
+            self._blocker_spots += 1
+        return self._bluff_last
+
     def decide(self, state):
+        self.refresh_settings()
+        if strategy.blocker_bluff_spot(state, self.chart, self.stack_bb):
+            state = {**state, 'bluff_ok': self.bluff_ok(state)}
         return strategy.decide(state, profile=self.opponent_profile(),
                                stack_bb=self.stack_bb, chart=self.chart)
 
@@ -558,6 +636,10 @@ def main(argv=None):
                     help='множитель агрессивности (размеры ставок; 0.5-2.0)')
     ap.add_argument('--defense', type=float, default=1.0,
                     help='множитель защиты (готовность коллить; 0.5-2.0)')
+    ap.add_argument('--style', default=strategy.DEFAULT_STYLE,
+                    choices=sorted(strategy.STYLE_PRESETS),
+                    help='пресет стиля (перекрывается записью в devices.json)')
+    ap.add_argument('--devices', help=f'файл настроек панели (по умолчанию {config.DEVICES_FILE})')
     ap.add_argument('--name', help='имя бота (для логов панели)')
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, 'reconfigure'):    # русский лог в консоли Windows (cp866)
@@ -571,22 +653,18 @@ def main(argv=None):
             print(f'ERR: чарт не загружен: {e}')
             return 2
         print(f'чарт: {chart.name} ({args.chart})')
-    if chart is not None and (args.aggression != 1.0 or args.defense != 1.0):
-        st = chart.settings
-        st['aggression'] = round(st['aggression'] * args.aggression, 3)
-        # защита: готовность коллить — выше пороги цены, ниже нужное эквити
-        st['medium_max_price'] = round(st['medium_max_price'] * args.defense, 3)
-        st['preflop_max_price'] = round(st['preflop_max_price'] * args.defense, 3)
-        st['cheap_price'] = round(st['cheap_price'] * args.defense, 3)
-        st['big_bet_price'] = round(st['big_bet_price'] * args.defense, 3)
-        st['max_call_stack_frac'] = round(st['max_call_stack_frac'] * args.defense, 3)
-        st['draw_min_equity'] = round(st['draw_min_equity'] / args.defense, 3)
-        print(f'настройки: агрессия x{args.aggression}, защита x{args.defense}')
+    # Ключи запуска — только запасные значения: живые настройки бот берёт из
+    # devices.json по своему серийнику и перечитывает их перед каждым решением.
+    cli_cfg = {'style': args.style, 'aggression': args.aggression,
+               'defense': args.defense, 'stack': args.stack}
+    print(f'настройки: стиль {args.style}, агрессия x{args.aggression}, '
+          f'защита x{args.defense}')
 
     screen = (FileScreen(args.image) if args.image
               else AdbScreen(adb=args.adb, serial=args.serial))
     bot = Bot(screen, dry_run=args.dry_run or bool(args.image), stack_bb=args.stack,
-              players_db=load_players_db(), tpl_dir=args.templates, chart=chart)
+              players_db=load_players_db(), tpl_dir=args.templates, chart=chart,
+              serial=args.serial or config.SERIAL, devices_path=args.devices, cfg=cli_cfg)
     if args.image or args.once:
         entry = bot.step()
         if entry is not None:

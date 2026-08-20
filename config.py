@@ -15,6 +15,7 @@ SHOTS_DIR = os.path.join(BASE, 'shots')
 SHOTS_LIVE = os.path.join(os.path.dirname(BASE), 'shots_live')   # кадры живых решений/промахов
 HAND_HISTORY = os.path.join(BASE, 'hand_history.jsonl')
 LOG_FILE = os.path.join(BASE, 'bot.log')
+DEVICES_FILE = os.path.join(BASE, 'devices.json')   # его пишет панель, бот перечитывает
 
 ADB = os.environ.get('CLUBGG_ADB', r'E:/down/platform-tools/platform-tools/adb.exe')
 SERIAL = os.environ.get('CLUBGG_SERIAL', '1cf5db29')
