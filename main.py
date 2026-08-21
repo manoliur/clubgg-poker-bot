@@ -17,6 +17,7 @@
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 import time
@@ -28,6 +29,26 @@ import config
 import opponents
 import table_state as ts
 import strategy
+
+# действие -> диапазон задержки в devices.json (см. config.TIMING_DEFAULTS)
+TIMING_KEYS = {'raise': 'timing_raise', 'call': 'timing_call',
+               'check': 'timing_fold', 'fold': 'timing_fold'}
+
+def timing_ranges(cfg):
+    """Диапазоны «раздумья» из записи устройства: {'timing_raise': (lo, hi), ...}.
+
+    Кривое значение (не пара чисел, перепутанные границы) молча заменяется
+    значением по умолчанию: из-за опечатки в панели бот думать вечность не должен.
+    """
+    out = {}
+    for key, default in config.TIMING_DEFAULTS.items():
+        try:
+            lo, hi = float((cfg or {})[key][0]), float((cfg or {})[key][1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            lo, hi = default
+        out[key] = (lo, hi) if 0 <= lo <= hi else tuple(default)
+    return out
+
 
 # --------------------------------------------------------------------------
 # источники кадров
@@ -101,6 +122,10 @@ class Bot:
                                            db=self.players_db)
         self.observer = opponents.HandObserver()
         self.opponent_memory = True     # флаг opponent_memory (панель)
+        self.human_timing = True        # флаг human_timing (панель)
+        self.timing = dict(config.TIMING_DEFAULTS)
+        self._turn_sig = None           # сигнатура хода, который сейчас на экране
+        self._turn_seen = None          # когда мы увидели его впервые (запас до таймаута)
         # копия: настройки меняются на лету (панель), чарт по умолчанию — общий на процесс
         self.chart = (chart or strategy.active_chart()).copy()
         # база, поверх которой каждый раз собираются стиль и ползунки: применять
@@ -248,6 +273,34 @@ class Bot:
             self.log('память оппонентов: ' + opponents.summary_line(row['name'], row))
         return rows
 
+    # ---------- человечные тайминги ----------
+    def human_delay(self, action, elapsed=0.0):
+        """Сколько «думать» перед тапом, секунд. 0 — тапаем сразу.
+
+        Запас важнее правдоподобия: ClubGG даёт на ход около 20-30 секунд, и
+        если кнопки висят давно (раскрывали столбец, перечитывали карты, ход
+        вернулся после долгих раздумий оппонента), задержка не добавляется —
+        проиграть ход по таймауту хуже, чем выглядеть роботом.
+        """
+        if not self.human_timing:
+            return 0.0
+        lo, hi = self.timing[TIMING_KEYS.get(action, 'timing_fold')]
+        delay = random.uniform(lo, hi) + random.uniform(-config.TIMING_JITTER,
+                                                        config.TIMING_JITTER)
+        delay = min(max(delay, 0.0), config.TIMING_MAX)
+        budget = config.TURN_BUDGET - config.TURN_RESERVE - max(0.0, elapsed)
+        return round(max(0.0, min(delay, budget)), 2)
+
+    def think(self, action):
+        """Пауза перед тапом. Возвращает, сколько реально прождали."""
+        elapsed = time.time() - self._turn_seen if self._turn_seen else 0.0
+        delay = self.human_delay(action, elapsed)
+        if self.human_timing and not delay and elapsed > 1.0:
+            self.log(f'ход на экране уже {elapsed:.0f}с — тапаю сразу, без паузы')
+        if delay:
+            time.sleep(delay)
+        return delay
+
     def bet_point(self, state, pot_frac=None):
         """Куда тапать ставку/рейз: центр ЖИВОГО пресета правого столбца. None — некуда.
 
@@ -297,6 +350,8 @@ class Bot:
         self.chart.settings = settings
         self.live_stack = bool(cfg.get('live_stack', True))
         self.opponent_memory = bool(cfg.get('opponent_memory', True))
+        self.human_timing = bool(cfg.get('human_timing', True))
+        self.timing = timing_ranges(cfg)
         stack = cfg.get('stack')
         if stack:
             try:
@@ -593,6 +648,7 @@ class Bot:
             'reason': reason,
             'tap': point,
             'dry_run': self.dry_run,
+            'think_s': 0.0,
         }
         self.log(f"#{self.hand_id} {state['street']} {state['hole']} доска={state['board']} "
                  f"поз={state['position']} игроков={state['players']}"
@@ -604,6 +660,7 @@ class Bot:
         elif self.save_frames:
             self._save_frame(img, action)
         if not self.dry_run and point:
+            entry['think_s'] = self.think(action)
             self.screen.tap(*point)
         self.observer.note_action(action, state['street'])
         self.record(entry)
@@ -683,11 +740,16 @@ class Bot:
                     if not (state['my_turn'] and state['in_hand']):
                         opp_acted = True    # ход не наш: оппонент думает/сыграл
                         self.stable = 0
+                        self._turn_sig = self._turn_seen = None
                         if interval:
                             time.sleep(interval)
                         continue
                     now = time.time()
                     sig = self._sig(state)
+                    if sig != self._turn_sig:
+                        # новый ход на экране: с этого мгновения тикает время до
+                        # таймаута, из которого «человечная» пауза берёт запас
+                        self._turn_sig, self._turn_seen = sig, now
                     if sig == acted_sig and now - acted_ts < retry_after:
                         if opp_acted:
                             # после нашего хода ход вернулся, а сигнатура «та же»:
@@ -785,6 +847,8 @@ def main(argv=None):
                     help='не читать свой стек с экрана (играть по --stack)')
     ap.add_argument('--no-memory', action='store_true',
                     help='не копить статистику оппонентов и не подстраиваться под неё')
+    ap.add_argument('--no-human-timing', action='store_true',
+                    help='без человечных пауз перед тапом (действовать сразу)')
     ap.add_argument('--max-actions', type=int, help='сыграть N решений и выйти')
     ap.add_argument('--adb', help=f'путь к adb (по умолчанию {config.ADB})')
     ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
@@ -816,7 +880,8 @@ def main(argv=None):
     cli_cfg = {'style': args.style, 'aggression': args.aggression,
                'defense': args.defense, 'stack': args.stack,
                'live_stack': not args.no_live_stack,
-               'opponent_memory': not args.no_memory}
+               'opponent_memory': not args.no_memory,
+               'human_timing': not args.no_human_timing}
     print(f'настройки: стиль {args.style}, агрессия x{args.aggression}, '
           f'защита x{args.defense}')
 

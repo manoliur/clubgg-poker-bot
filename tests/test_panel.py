@@ -228,27 +228,48 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('--no-live-stack', popen.call_args[0][0])
 
-    def test_memory_flag_is_on_by_default(self):
+    def test_bot_flags_are_on_by_default(self):
         serial = self.mgr.devices[0]['serial']
         with mock.patch.object(self.mgr, 'adb_online', return_value=[]):
             flags = self.mgr.status(serial)['flags']
         self.assertTrue(flags['opponent_memory'])
+        self.assertTrue(flags['human_timing'])
 
-    def test_memory_flag_is_saved(self):
+    def test_bot_flags_are_saved(self):
         serial = self.mgr.devices[0]['serial']
-        self.mgr.save_config(serial, {'opponent_memory': False})
+        self.mgr.save_config(serial, {'opponent_memory': False, 'human_timing': False})
         with open(self.path, encoding='utf-8') as f:
-            self.assertIs(json.load(f)[0]['opponent_memory'], False)
+            saved = json.load(f)[0]
+        self.assertIs(saved['opponent_memory'], False)
+        self.assertIs(saved['human_timing'], False)
 
-    def test_start_turns_the_memory_off(self):
+    def test_start_turns_the_bot_flags_off(self):
         serial = self.mgr.devices[0]['serial']
-        self.mgr.save_config(serial, {'opponent_memory': False})
+        self.mgr.save_config(serial, {'opponent_memory': False, 'human_timing': False})
         with mock.patch.object(self.panel.subprocess, 'Popen') as popen, \
              mock.patch.object(self.panel.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
             popen.return_value = mock.Mock(pid=4242)
             with mock.patch.object(self.panel, 'LOGS_DIR', self.tmp):
                 self.mgr.start(serial)
-        self.assertIn('--no-memory', popen.call_args[0][0])
+        cmd = popen.call_args[0][0]
+        self.assertIn('--no-memory', cmd)
+        self.assertIn('--no-human-timing', cmd)
+
+    def test_timing_ranges_are_shown_and_saved(self):
+        serial = self.mgr.devices[0]['serial']
+        with mock.patch.object(self.mgr, 'adb_online', return_value=[]):
+            shown = self.mgr.status(serial)['timing']
+        self.assertEqual(shown['timing_raise'], [1.0, 3.0])
+        self.mgr.save_config(serial, {'timing_raise': [2.0, 4.0]})
+        with mock.patch.object(self.mgr, 'adb_online', return_value=[]):
+            self.assertEqual(self.mgr.status(serial)['timing']['timing_raise'], [2.0, 4.0])
+
+    def test_bad_timing_range_is_ignored(self):
+        serial = self.mgr.devices[0]['serial']
+        self.mgr.save_config(serial, {'timing_call': [3.0, 1.0], 'timing_fold': 'быстро'})
+        d = self.mgr.device(serial)
+        self.assertNotIn('timing_call', d)
+        self.assertNotIn('timing_fold', d)
 
     def test_opponents_block_reads_players_json(self):
         import opponents

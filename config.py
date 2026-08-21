@@ -21,8 +21,20 @@ PLAYERS_FILE = os.path.join(BASE, 'players.json')   # профили оппон�
 # --- поведение самого бота ---
 # Переключатели, которые живут в записи устройства (в настройки стратегии не
 # входят): панель пишет их в devices.json, бот перечитывает перед решением.
-# Оба по умолчанию включены.
-BOT_FLAGS = ('live_stack', 'opponent_memory')
+# Все три по умолчанию включены.
+BOT_FLAGS = ('live_stack', 'opponent_memory', 'human_timing')
+
+# Человечные тайминги: сколько «думать» перед тапом, секунд (мин, макс).
+# Ключи те же, что в devices.json, — диапазон можно поправить руками.
+TIMING_DEFAULTS = {
+    'timing_raise': (1.0, 3.0),    # крупное решение — думаем дольше
+    'timing_call': (0.3, 1.2),
+    'timing_fold': (0.2, 0.8),     # чек/фолд — рутина, тянуть нечего
+}
+TIMING_JITTER = 0.3          # ±секунды поверх выбранного диапазона
+TIMING_MAX = 5.0             # больше этого на один ход не добавляем никогда
+TURN_BUDGET = 20.0           # сколько ClubGG даёт на ход (нижняя оценка, бывает 30)
+TURN_RESERVE = 6.0           # запас до таймаута: тап должен пройти заведомо раньше
 
 ADB = os.environ.get('CLUBGG_ADB', r'E:/down/platform-tools/platform-tools/adb.exe')
 SERIAL = os.environ.get('CLUBGG_SERIAL', '1cf5db29')

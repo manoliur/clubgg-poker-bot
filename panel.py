@@ -47,11 +47,18 @@ FLAGS = [
 # записи устройства). live_stack: бот читает свой стек с экрана раз в раздачу и
 # сам обновляет поле stack; выключено — играет по числу из панели, как раньше.
 # opponent_memory: копить статистику оппонентов и подстраиваться под неё.
+# human_timing: случайная пауза «раздумья» перед тапом.
 BOT_FLAGS = [
     ('live_stack', 'Живой стек — читать с экрана'),
     ('opponent_memory', 'Память оппонентов — статистика'),
+    ('human_timing', 'Человечные паузы перед ходом'),
 ]
 BOT_FLAG_KEYS = [f[0] for f in BOT_FLAGS]
+
+# Диапазоны пауз (секунды) — правятся в devices.json, панель их показывает.
+TIMING_KEYS = list(config.TIMING_DEFAULTS)
+TIMING_TITLES = {'timing_raise': 'рейз/бет', 'timing_call': 'колл',
+                 'timing_fold': 'чек/фолд'}
 
 # Ползунки порогов: ключ, подпись, min, max, шаг.
 SLIDERS = [
@@ -202,8 +209,21 @@ class BotManager:
                 'style': str(d.get('style') or strategy.DEFAULT_STYLE).lower(),
                 'flags': flags,
                 'sliders': {k: settings[k] for k in SLIDER_KEYS},
+                'timing': self.timing(serial),
                 'opponents': self.opponents(),
                 'log': tail}
+
+    def timing(self, serial):
+        """Диапазоны пауз этого устройства (секунды) — подписью рядом с галочкой."""
+        d = self.device(serial) or {}
+        out = {}
+        for key, default in config.TIMING_DEFAULTS.items():
+            value = d.get(key)
+            try:
+                out[key] = [float(value[0]), float(value[1])]
+            except (TypeError, ValueError, IndexError, KeyError):
+                out[key] = list(default)
+        return out
 
     @staticmethod
     def opponents():
@@ -245,6 +265,8 @@ class BotManager:
             cmd += ['--no-live-stack']
         if not d.get('opponent_memory', True):
             cmd += ['--no-memory']
+        if not d.get('human_timing', True):
+            cmd += ['--no-human-timing']
         if d.get('name'):
             cmd += ['--name', d['name']]
         f = open(log_path, 'a', encoding='utf-8')
@@ -314,6 +336,13 @@ class BotManager:
                     d[key] = float(data[key])
                 except (TypeError, ValueError):
                     pass
+        for key in TIMING_KEYS:
+            try:                       # пара [мин, макс] секунд; кривое — не пишем
+                lo, hi = float(data[key][0]), float(data[key][1])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+            if 0 <= lo <= hi:
+                d[key] = [lo, hi]
         self.save_devices()
         return d
 
@@ -408,6 +437,10 @@ async function refresh(){
      `<div class="cell"><label>${title}</label>
        <input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${step}" value="${d.sliders[k]}">
        <span class="val">${d.sliders[k]}</span></div>`).join('')}</div>
+   <div class="hint">Паузы перед ходом: ${Object.entries(d.timing||{}).map(([k,v]) =>
+     `${(data.timings||{})[k]||k} ${v[0]}-${v[1]}с`).join(' · ')} (плюс джиттер ±0.3с,
+     не больше 5с на ход и только когда есть запас до таймаута; диапазоны правятся
+     в devices.json)</div>
    <div class="opps"><b>Оппоненты</b>${(d.opponents||[]).length ? `<table>
      <tr><th>Имя</th><th>Рук</th><th>VPIP</th><th>PFR</th><th>3-бет</th><th>Agg</th></tr>
      ${d.opponents.map(o => `<tr><td>${esc(o.name)}</td><td>${o.hands}</td>
@@ -492,7 +525,8 @@ class Handler(BaseHTTPRequestHandler):
             devices = [MANAGER.status(d['serial']) for d in MANAGER.devices]
             self._send(200, {'devices': devices, 'charts': MANAGER.charts(),
                              'styles': MANAGER.styles(), 'flags': FLAGS + BOT_FLAGS,
-                             'sliders': SLIDERS, 'total': len(devices)})
+                             'sliders': SLIDERS, 'timings': TIMING_TITLES,
+                             'total': len(devices)})
             return
         self._send(404, {'error': 'not found'})
 
