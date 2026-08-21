@@ -273,6 +273,74 @@ class MainLoopTest(IsolatedBotTest):
         self.assertEqual((entry['pot_bb'], entry['to_call_bb']), (1.5, 0.5))
         self.assertEqual(entry['action'], 'raise', entry['reason'])
 
+    # ---------- свой рейз на префлопе ----------
+    def preflop_state(self, hole=('Qs', 'Qc'), has_bet=False, to_call=None, board=()):
+        """Готовое состояние своего хода: кадр рисуется, а ставка задаётся руками."""
+        frame = synth.render(hole=list(hole), board=list(board), buttons=True,
+                             call_amount=True, dealer='me', players=2, presets=3)
+        s = ts.read_state(frame, tpl_dir=self.tpl)
+        s.update({'hole': list(hole), 'my_turn': True, 'in_hand': True,
+                  'has_bet': has_bet, 'to_call_bb': to_call, 'pot_bb': 3.0})
+        return s
+
+    def raising_bot(self, hole=('Qs', 'Qc'), tpl_dir=None):
+        """Бот, уже поднявший на этом префлопе с рукой hole."""
+        bot, screen = self.make_bot([], tpl_dir=tpl_dir or self.tpl)
+        entry = bot.step(state=self.preflop_state(hole=hole))
+        self.assertEqual(entry['action'], 'raise', entry['reason'])
+        self.assertTrue(bot.raised_preflop, 'свой рейз запомнен')
+        return bot, screen
+
+    def test_our_preflop_raise_is_remembered(self):
+        self.raising_bot()
+
+    def test_a_new_hand_forgets_our_raise(self):
+        """Флаг живёт одну раздачу: со сменой карманных карт всё начинается заново."""
+        bot, _ = self.raising_bot()
+        bot.step(state=self.preflop_state(has_bet=True, to_call=9.0))
+        self.assertTrue(bot.raised_preflop, 'те же карты — та же раздача, не сбрасываем')
+        # новые карты, и на этот раз мы не поднимаем — флаг чист
+        entry = bot.step(state=self.preflop_state(hole=('7s', '2d'), has_bet=True,
+                                                  to_call=9.0))
+        self.assertEqual(entry['action'], 'fold', entry['reason'])
+        self.assertFalse(bot.raised_preflop)
+
+    def test_a_postflop_raise_is_not_a_preflop_raise(self):
+        bot, _ = self.make_bot([], tpl_dir=self.tpl)
+        entry = bot.step(state=self.preflop_state(hole=('9h', '9c'),
+                                                  board=('9d', '5s', '2c')))
+        self.assertEqual(entry['action'], 'raise', entry['reason'])
+        self.assertFalse(bot.raised_preflop, 'сет на флопе — это не рейз префлопа')
+
+    def test_the_strategy_is_told_about_our_raise(self):
+        """Своего прошлого хода стратегия не помнит — его передаёт главный цикл."""
+        bot, _ = self.make_bot([], tpl_dir=self.tpl)
+        with mock.patch.object(main_mod.strategy, 'decide',
+                               wraps=main_mod.strategy.decide) as decide:
+            bot.step(state=self.preflop_state())
+            self.assertFalse(decide.call_args[0][0]['hero_raised'])
+            bot.step(state=self.preflop_state(has_bet=True, to_call=9.0))
+            self.assertTrue(decide.call_args[0][0]['hero_raised'])
+
+    def test_a_big_open_is_called_and_a_reraise_is_folded(self):
+        """Ради чего всё: 4.5ББ — это открытие, но те же 4.5ББ поверх нашего рейза — 3-бет.
+
+        Раньше порогом «перед нами 3-бет» был один размер (1.6 открытия), и бот
+        пасовал TT против обычного крупного открытия — весь диапазон колла.
+        """
+        opened = self.preflop_state(hole=('Th', 'Td'), has_bet=True, to_call=4.5)
+        opened['pot_bb'] = 8.5
+        bot, _ = self.make_bot([], tpl_dir=self.numeric_tpl())
+        entry = bot.step(state=opened)
+        self.assertIn(entry['action'], ('call', 'raise'), entry['reason'])
+        self.assertNotIn('против 3-бета+', entry['reason'])
+
+        # та же рука и та же доплата, но уже поверх НАШЕГО открытия
+        bot, _ = self.raising_bot(hole=('Th', 'Td'), tpl_dir=self.numeric_tpl())
+        entry = bot.step(state=opened)
+        self.assertEqual(entry['action'], 'fold', entry['reason'])
+        self.assertIn('против 3-бета+', entry['reason'])
+
     # ---------- свёрнутый столбец ставки: двухшаговый тап ----------
     def collapsed_bot(self, frames, dry_run=False):
         """Бот без пауз между тапом шеврона и перечитыванием кадра."""

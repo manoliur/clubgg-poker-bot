@@ -163,6 +163,7 @@ class Bot:
         self.log_path = log_path or config.LOG_FILE
         self.history_path = history_path or config.HAND_HISTORY
         self.hand_id = 0
+        self.raised_preflop = False     # мы уже поднимали на этом префлопе
         self.last_hole = None
         self.last_action_ts = 0.0
         self.last_state = None
@@ -690,6 +691,9 @@ class Bot:
 
     def decide(self, state):
         self.refresh_settings()
+        # свой рейз на префлопе стратегия видит только отсюда: по нему она
+        # отличает ререйз оппонента от обычного открытия (см. decide_preflop)
+        state = {**state, 'hero_raised': self.raised_preflop}
         if strategy.blocker_bluff_spot(state, self.chart, self.stack_bb):
             state = {**state, 'bluff_ok': self.bluff_ok(state)}
         return strategy.decide(state, profile=self.opponent_profile(state),
@@ -800,6 +804,7 @@ class Bot:
         if hole and hole != self.last_hole:
             self.hand_id += 1
             self.last_hole = hole
+            self.raised_preflop = False
             # стек читаем на первом ходе раздачи: короткий стек, «колл ≥ доли
             # стека = алл-ин» и имплайд-оддсы должны считаться от правды, а не
             # от константы, записанной в панели один раз
@@ -872,6 +877,8 @@ class Bot:
         if not self.dry_run and point:
             entry['think_s'] = self.think(action)
             self.screen.tap(*point)
+        if state['street'] == 'preflop' and action == 'raise':
+            self.raised_preflop = True   # дальше ставка перед нами — уже ререйз
         self.observer.note_action(action, state['street'])
         self.record(entry)
         self.actions += 1

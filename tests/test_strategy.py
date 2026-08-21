@@ -284,6 +284,51 @@ class AllInDefenceTest(unittest.TestCase):
                 self.assertEqual(post['action'], 'check', post['reason'])
 
 
+class BigOpenTest(unittest.TestCase):
+    """Крупное открытие — это открытие, а не 3-бет (пока мы сами не поднимали).
+
+    Защита «против 3-бета+ играем только премиумом» отличала ререйз от открытия
+    по размеру: доплата больше 1.6 открытия (4ББ) считалась 3-бетом. На живых
+    столах открывают и в 4.5-5ББ, и бот пасовал TT, 99, AJo, KQs — весь диапазон
+    колла — против одного-единственного рейза. Теперь порог зависит от того,
+    поднимали ли МЫ: свой рейз в раздаче видит главный цикл (Bot.raised_preflop).
+    """
+
+    def hand(self, hole, to_call, **kw):
+        base = {'hole': hole, 'position': 'BTN', 'players': 6, 'players_seated': 6,
+                'has_bet': True, 'to_call_bb': to_call, 'pot_bb': to_call + 1.5}
+        base.update(kw)
+        return st.decide(state(**base), stack_bb=100.0)
+
+    def test_a_plain_big_open_keeps_the_calling_range(self):
+        for hole in (['Th', 'Td'], ['9h', '9d'], ['Ah', 'Js'], ['Kh', 'Qh']):
+            for to_call in (4.5, 5.0, 5.5):
+                with self.subTest(hole=hole, to_call=to_call):
+                    # банк: открытие плюс блайнды и лимперы, цена колла разумная
+                    d = self.hand(hole, to_call, pot_bb=to_call + 4.0)
+                    self.assertNotIn('против 3-бета+', d['reason'])
+                    self.assertIn(d['action'], ('call', 'raise'), d['reason'])
+
+    def test_after_our_raise_the_same_bet_is_a_reraise(self):
+        for hole in (['Th', 'Td'], ['9h', '9d'], ['Ah', 'Js'], ['Kh', 'Qh']):
+            with self.subTest(hole=hole):
+                d = self.hand(hole, 4.5, hero_raised=True)
+                self.assertEqual(d['action'], 'fold', d['reason'])
+                self.assertIn('против 3-бета+', d['reason'])
+
+    def test_a_real_three_bet_is_caught_even_without_our_raise(self):
+        """Холодный 3-бет (доплата от 3 открытий) защиту всё равно включает."""
+        d = self.hand(['Th', 'Td'], 9.0)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('против 3-бета+', d['reason'])
+
+    def test_premium_still_folds_to_a_four_bet(self):
+        """Тот самый живой кейс: AQs против 4-бета поверх нашего 3-бета — фолд."""
+        d = self.hand(['As', 'Qs'], 20.0, pot_bb=32.0, hero_raised=True)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('4-бета', d['reason'])
+
+
 class PotOddsTest(unittest.TestCase):
     """Живая раздача 19.08 15:49 #21: 6s6c на 2s 8s Qs 4s.
 

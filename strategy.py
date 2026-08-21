@@ -663,11 +663,14 @@ def _versus(no_raise, to_call_bb, stack_bb):
 
 
 def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb, chart=None,
-                   no_raise=False):
+                   no_raise=False, hero_raised=False):
     """Решение на префлопе. no_raise — рейз недоступен (оппонент в алл-ине).
 
     Когда рейзить нечем или ставка перед нами размером с полстека, чарты 3-бета
     и 4-бета не применяются: вопрос уже не «повышать ли», а окупается ли колл.
+
+    hero_raised — мы на этом префлопе уже поднимали. По этому признаку ставка
+    перед нами отличается от обычного открытия: см. is_3bet ниже.
     """
     chart = chart or _ACTIVE
     st = chart.settings
@@ -708,12 +711,21 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
     # по чарту нельзя. Живая раздача 19.08 09:52: 76s ответила 3-бетом на
     # алл-ин, рейзить было нечем, и тап выродился в колл 23.7ББ (34% стека).
     big = to_call_bb is not None and stack_bb and to_call_bb > cap * stack_bb
-    # Перед нами 3-бет или крупнее (ставка заметно больше открытия ~2.5ББ)?
-    # Тогда диапазон 3-бета НЕ применяется: 5-бетить AQ нельзя — у оппонента,
-    # дошедшего до 4-бета, диапазон QQ+/AK. Живой кейс: AQ «на велью» против
-    # 4-бета доходил до алл-ина против карманных тузов. Против 3-бета+ играем
-    # только монстрами (4-бет QQ+/AK) и премиумом (колл JJ+/AQs+), остальное — фолд.
-    is_3bet = to_call_bb is not None and to_call_bb > (st.get('open_size_bb') or 2.5) * 1.6
+    # Перед нами 3-бет или крупнее? Тогда диапазон 3-бета НЕ применяется:
+    # 5-бетить AQ нельзя — у оппонента, дошедшего до 4-бета, диапазон QQ+/AK.
+    # Живой кейс: AQ «на велью» против 4-бета доходил до алл-ина против
+    # карманных тузов. Против 3-бета+ играем только монстрами (4-бет QQ+/AK) и
+    # премиумом (колл JJ+/AQs+), остальное — фолд.
+    #
+    # Отличить ререйз от обычного открытия можно только по нашему же прошлому
+    # ходу: если мы уже поднимали, любая доплата от 1.6 открытий — это ставка
+    # ПОВЕРХ нашего рейза. А пока мы не поднимали, столько стоит и обычное
+    # открытие: на живых столах открывают и в 4.5-5ББ, и по порогу 1.6 бот
+    # пасовал TT, 99, AJo, KQs — весь диапазон колла. Без своего рейза порогом
+    # служит размер НАСТОЯЩЕГО 3-бета (открытие x three_bet_mult).
+    open_bb = st.get('open_size_bb') or 2.5
+    is_3bet = (to_call_bb is not None
+               and to_call_bb > open_bb * (1.6 if hero_raised else mult))
     if not no_raise and not (big and not premium):
         if in_range(hole, chart.four_bet):
             if short:
@@ -725,7 +737,7 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
             if premium:
                 # против 4-бета (ставка от ~4x открытия) премиум без монстра пасует:
                 # 4-беттер держит QQ+/AK, AQs там ~30% эквити
-                if to_call_bb > (st.get('open_size_bb') or 2.5) * 4:
+                if to_call_bb > open_bb * 4:
                     return _d('fold', f'{code}: фолд против 4-бета — '
                                       f'{_odds_note(price, 0.30)}')
                 if big and price is not None and price >= st['big_bet_price']:
@@ -986,7 +998,8 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
     try:
         if street == 'preflop' or not board:
             decision = decide_preflop(hole, position, seated, has_bet, to_call, pot,
-                                      stack_bb, chart, no_raise=no_raise)
+                                      stack_bb, chart, no_raise=no_raise,
+                                      hero_raised=bool(state.get('hero_raised')))
             made = 'preflop'
         else:
             # first_to_act == 'me' — говорим первыми, то есть играем без позиции
