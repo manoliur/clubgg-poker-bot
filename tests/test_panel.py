@@ -2,12 +2,17 @@
 """Тесты связки «панель -> devices.json -> бот»: сохранение настроек в панели и
 их применение ботом без перезапуска.
 """
+import contextlib
+import io
 import json
 import os
+import socket
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
+from urllib.request import urlopen
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import strategy as st                      # noqa: E402
@@ -296,6 +301,94 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(set(styles), set(st.STYLE_PRESETS))
         self.assertEqual(styles['loose']['title'], st.STYLE_TITLES['loose'])
         self.assertIn('cbet_pot', styles['loose']['sliders'])
+
+    def test_a_foreign_devices_file_falls_back_to_defaults(self):
+        """Панель — глобальный объект: на чужом файле она не должна падать при импорте.
+
+        Раньше load_devices ловила только сломанный JSON. Целый, но не тот
+        (словарь настроек, список строк) валил панель на старте — с ним она не
+        открывалась вовсе, а починить файл было неоткуда.
+        """
+        for junk in ({'serial': 'abc'}, ['1cf5db29'], [], [{'name': 'без серийника'}],
+                     'не json вовсе', 17):
+            with self.subTest(junk=junk):
+                with open(self.path, 'w', encoding='utf-8') as f:
+                    if junk == 'не json вовсе':
+                        f.write(junk)
+                    else:
+                        json.dump(junk, f)
+                mgr = self.panel.BotManager()
+                self.assertEqual([d['serial'] for d in mgr.devices],
+                                 [d['serial'] for d in self.panel.DEFAULT_DEVICES])
+                with open(self.path, encoding='utf-8') as f:
+                    self.assertEqual(json.load(f), mgr.devices, 'умолчания записаны')
+
+    def test_records_without_a_serial_are_dropped(self):
+        """Мусор рядом с живой записью — выкидываем мусор, а не всё устройство."""
+        with open(self.path, 'w', encoding='utf-8') as f:
+            json.dump([{'serial': 'live1', 'style': 'loose'}, 'строка', {'name': 'ничей'}], f)
+        mgr = self.panel.BotManager()
+        self.assertEqual([d['serial'] for d in mgr.devices], ['live1'])
+
+    def test_the_bot_writes_its_log_in_utf8(self):
+        """Лог панель читает в utf-8; без этого бот писал в него по локали Windows.
+
+        Русские строки приходили в cp1251, и живой лог в панели был «????».
+        """
+        serial = self.mgr.devices[0]['serial']
+        with mock.patch.object(self.panel.subprocess, 'Popen') as popen, \
+             mock.patch.object(self.panel.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+            popen.return_value = mock.Mock(pid=4242)
+            with mock.patch.object(self.panel, 'LOGS_DIR', self.tmp):
+                self.assertTrue(self.mgr.start(serial)[0])
+        self.addCleanup(self.mgr.log_files[serial].close)
+        self.assertEqual(popen.call_args[1]['env'].get('PYTHONIOENCODING'), 'utf-8')
+        self.assertIn('PATH', popen.call_args[1]['env'], 'остальное окружение на месте')
+
+    def test_a_second_panel_does_not_take_a_busy_port(self):
+        """Порт занят — вторая панель честно ругается и выходит с кодом 1.
+
+        Иначе (на Windows SO_REUSEADDR это позволяет) поднималась вторая панель,
+        запросы уходили то в неё, то в старую, а pid-файлы ботов держали обе.
+        """
+        busy = socket.socket()
+        busy.bind(('127.0.0.1', 0))
+        busy.listen(1)
+        self.addCleanup(busy.close)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.panel.main(['--port', str(busy.getsockname()[1])])
+        self.assertEqual(code, 1)
+        self.assertIn('занят', out.getvalue())
+
+    def test_the_panel_serves_and_closes_its_port(self):
+        """Обычный запуск: панель села на порт, отдала список устройств и освободила его."""
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', 0))
+            port = s.getsockname()[1]
+        served = []
+
+        def ask():
+            with urlopen(f'http://127.0.0.1:{port}/api/devices', timeout=5) as r:
+                served.append(json.load(r))
+
+        client = threading.Thread(target=ask, daemon=True)
+
+        def serve(server):
+            """Вместо вечного цикла — ровно один запрос, потом выход как по Ctrl+C."""
+            client.start()
+            server.handle_request()      # запрос обслуживает отдельный поток
+            client.join(5)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(self.panel.PanelServer, 'serve_forever', autospec=True,
+                               side_effect=serve), \
+             mock.patch.object(self.panel, 'MANAGER', self.mgr), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.panel.main(['--port', str(port)]), 0)
+        self.assertEqual(served[0]['total'], len(self.mgr.devices))
+        # порт освобождён (server_close в finally) — следующая панель на него сядет
+        self.panel.PanelServer(('127.0.0.1', port), self.panel.Handler).server_close()
 
     def test_start_passes_the_style(self):
         serial = self.mgr.devices[0]['serial']

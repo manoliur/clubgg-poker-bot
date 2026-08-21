@@ -11,3 +11,4 @@ shots_digits/
 devices.json
 logs/
 shots_stack/
+_probe*.py

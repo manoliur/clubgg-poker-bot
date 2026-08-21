@@ -136,11 +136,20 @@ class BotManager:
         if os.path.exists(DEVICES_FILE):
             try:
                 with open(DEVICES_FILE, encoding='utf-8') as f:
-                    self.devices = json.load(f)
+                    devices = json.load(f)
+            except (OSError, ValueError):
+                devices = None
+            # список словарей с серийником — единственный формат, который панель
+            # понимает; на чужом файле она не должна падать при запуске (MANAGER
+            # глобальный). Не осталось ни одной записи — это тот же испорченный
+            # файл: добавить устройство из панели нельзя, и без отката к
+            # умолчаниям она открылась бы пустой навсегда.
+            usable = [d for d in devices if isinstance(d, dict) and d.get('serial')] \
+                if isinstance(devices, list) else []
+            if usable:
+                self.devices = usable
                 self._mtime = self._file_mtime()
                 return
-            except (OSError, ValueError):
-                pass
         self.devices = [dict(d) for d in DEFAULT_DEVICES]   # копия: записи правятся на месте
         self.save_devices()
 
@@ -279,9 +288,15 @@ class BotManager:
         f = open(log_path, 'a', encoding='utf-8')
         f.write(f'\n[{time.strftime("%Y-%m-%d %H:%M:%S")}] === СТАРТ ===\n')
         f.flush()
+        # Лог панель пишет и читает в utf-8, а перенаправленный stdout бот берёт
+        # из локали Windows (cp1251) — русские строки приходили в файл в другой
+        # кодировке, и живой лог в панели превращался в «????». Кодировку дочернего
+        # процесса задаём явно; на консольный запуск бота это не влияет.
+        env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
         try:
             p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT,
-                                 cwd=BASE, creationflags=subprocess.CREATE_NO_WINDOW)
+                                 cwd=BASE, env=env,
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             f.close()
             return False, f'не запустился: {e}'
@@ -568,17 +583,37 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {'error': 'not found'})
 
 
-def main():
+class PanelServer(ThreadingHTTPServer):
+    """Панель на порту одна.
+
+    На Windows SO_REUSEADDR разрешает ВТОРОМУ сокету сесть на уже занятый порт:
+    вторая панель молча запускалась, запросы начинали уходить то в неё, то в
+    старую, а pid-файлы ботов держали обе. allow_reuse_address там выключаем —
+    вторая панель честно скажет «порт занят». На посиксе он нужен, чтобы панель
+    перезапускалась сразу после Ctrl+C, а второй bind там и так не проходит.
+    """
+
+    allow_reuse_address = sys.platform != 'win32'
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description='Веб-панель ClubGG')
     ap.add_argument('--port', type=int, default=8090)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    try:
+        server = PanelServer(('127.0.0.1', args.port), Handler)
+    except OSError as e:
+        print(f'ERR: порт {args.port} занят — панель уже запущена? ({e})')
+        return 1
     print(f'Панель: http://127.0.0.1:{args.port}  (Ctrl+C — выход)')
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        server.server_close()
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
