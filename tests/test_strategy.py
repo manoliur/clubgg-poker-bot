@@ -494,6 +494,31 @@ class BetSizeTest(unittest.TestCase):
                 self.assertIsNotNone(d['pot_frac'])
                 self.assertAlmostEqual(d['amount_bb'], round(10.0 * d['pot_frac'], 1))
 
+    def test_no_bet_is_bigger_than_the_pot(self):
+        """Пресета крупнее «100% банка» в клиенте нет — доля банка не выходит за 1.0.
+
+        Блеф с блокером считался мимо bet_frac и при агрессии x2 просил 144%
+        банка: тап уходил в тот же пресет 100%, а в лог и историю раздач
+        попадал выдуманный размер.
+        """
+        chart = st.DEFAULT_CHART.copy()
+        chart.settings = st.device_settings(
+            st.DEFAULT_SETTINGS, {'style': 'aggressive', 'aggression': 2.0,
+                                  'blocker_bluff': True, 'bet_sizing': True})
+        spots = [
+            {'hole': ['Ah', '2d'], 'board': ['Kh', '7h', '3h', '9c', '4s'],
+             'street': 'river', 'bluff_ok': True},                    # блеф с блокером
+            {'hole': ['As', 'Ks'], 'board': ['Qs', '9s', '2s'], 'street': 'flop'},
+            {'hole': ['9h', '9c'], 'board': ['9d', '5s', '2c'], 'street': 'turn'},
+        ]
+        for kw in spots:
+            d = st.decide(state(has_bet=False, pot_bb=20.0, players=2, **kw),
+                          stack_bb=100.0, chart=chart)
+            with self.subTest(**kw):
+                self.assertEqual(d['action'], 'raise', d['reason'])
+                self.assertLessEqual(d['pot_frac'], 1.0, d['reason'])
+                self.assertLessEqual(d['amount_bb'], 20.0, d['reason'])
+
 
 class RobustnessTest(unittest.TestCase):
     def test_unrecognized_cards_are_safe(self):

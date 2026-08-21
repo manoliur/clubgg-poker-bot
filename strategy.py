@@ -922,8 +922,10 @@ def _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, player
         # цикл (bluff_ok), иначе бот блефовал бы в каждой такой раздаче.
         blocker = nut_blocker(hole, board)
         if blocker and bluff_ok:
+            # больше банка не ставим — как и в bet_frac: крупнее пресета «100%»
+            # в клиенте ничего нет, а в лог и историю уходил бы выдуманный размер
             return _raise_pot(f'блеф с блокером ({blocker})', pot_bb,
-                              st['blocker_bluff_pot'] * st['aggression'])
+                              round(min(st['blocker_bluff_pot'] * st['aggression'], 1.0), 3))
         if blocker:
             return _d('check', f'{name}: блокер {blocker}, но блеф слишком часто — чек')
     if made == 'draw' or draws:
