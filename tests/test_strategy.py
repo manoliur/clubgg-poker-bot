@@ -514,8 +514,17 @@ class RobustnessTest(unittest.TestCase):
         base = state(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], street='flop',
                      has_bet=False, pot_bb=6.0, players=2)
         self.assertEqual(st.decide(base)['action'], 'raise')
-        loose = st.decide(base, profile={'vpip': 0.55, 'agg': 0.5})
+        loose = st.decide(base, profile={'hands': 30, 'vpip': 0.55, 'agg': 0.5})
         self.assertEqual(loose['action'], 'check')
+
+    def test_fresh_profile_is_not_trusted_yet(self):
+        """Одна раздача — ещё не статистика: VPIP 100% после первой руки бывает у всех."""
+        base = state(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], street='flop',
+                     has_bet=False, pot_bb=6.0, players=2)
+        fresh = {'hands': st.MIN_PROFILE_HANDS - 1, 'vpip': 1.0, 'agg': 0.5}
+        self.assertEqual(st.decide(base, profile=fresh)['action'], 'raise')
+        ripe = dict(fresh, hands=st.MIN_PROFILE_HANDS)
+        self.assertEqual(st.decide(base, profile=ripe)['action'], 'check')
 
 
 if __name__ == '__main__':

@@ -178,6 +178,7 @@ DEVICE_SETTING_KEYS = tuple(k for k in DEFAULT_SETTINGS if k != 'aggression')
 SHOWDOWN_EQUITY = {'nuts': 0.85, 'strong': 0.65, 'medium': 0.45, 'weak': 0.30}
 CALL_MARGIN = 0.05          # запас: коллим, когда цена заметно ниже эквити
 BLIND_PRICE = 0.33          # цена колла, когда чисел банка нет (ставка ~полбанка)
+MIN_PROFILE_HANDS = 20      # короче — цифры профиля ещё шум (см. adjust_for_opponent)
 
 
 # --------------------------------------------------------------------------
@@ -932,8 +933,13 @@ def _bet_size(pot_bb, fraction):
 # адаптация под оппонента и общий вход
 # --------------------------------------------------------------------------
 def adjust_for_opponent(decision, profile, made):
-    """Правки по players.json: против лузово-пассивных не блефуем, против тайтовых — чаще."""
-    if not profile:
+    """Правки по players.json: против лузово-пассивных не блефуем, против тайтовых — чаще.
+
+    Профиль моложе MIN_PROFILE_HANDS не применяется: после одной раздачи, в
+    которой оппонент просто заплатил блайнд, VPIP у него 100%, и бот перестал бы
+    блефовать против кого угодно с первой же руки.
+    """
+    if not profile or int(profile.get('hands') or 0) < MIN_PROFILE_HANDS:
         return decision
     vpip = profile.get('vpip') or 0
     agg = profile.get('agg') or 0
