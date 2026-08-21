@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Тесты чтения ников: зоны на живых кадрах, нормализация, привязка профилей.
+
+Tesseract'а на сервере нет, и ставить его ради тестов незачем: запуск вынесен в
+nick_reader.run_tesseract, и тесты подменяют именно её. Так проверяется всё,
+кроме самого распознавания, — вырезка зоны, чистка результата, поведение при
+сбое OCR, слияние профилей и флаг read_nicks.
+"""
+import glob
+import os
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+import cv2
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config                                # noqa: E402
+import nick_reader as nr                     # noqa: E402
+import opponents                             # noqa: E402
+from main import Bot                         # noqa: E402
+from tests.test_opponents import state       # noqa: E402
+
+SHOTS = sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'shots_stack', '*.jpg')))
+
+EXE = r'C:\Program Files\Tesseract-OCR\tesseract.exe'   # в тестах не запускается
+
+
+def text_ink(patch):
+    """Доля светло-серых пикселей — так выглядит ник на тёмной плашке."""
+    hi = patch.max(axis=2).astype(int)
+    lo = patch.min(axis=2).astype(int)
+    return float((((hi - lo) < 45) & (hi > 140)).mean())
+
+
+def ocr(text):
+    """Подмена запуска tesseract: что бы ни попросили, вернуть этот текст."""
+    return mock.patch.object(nr, 'run_tesseract', lambda *a, **kw: text)
+
+
+class ZoneTest(unittest.TestCase):
+    """Зоны ников: не выходят за кадр, не лезут в соседние элементы плашки."""
+
+    def test_zones_are_sane_fractions(self):
+        for seat, zone in enumerate(config.NICK_ZONES):
+            with self.subTest(seat=seat):
+                x0, y0, x1, y1 = zone
+                self.assertTrue(0.0 <= x0 < x1 <= 1.0, zone)
+                self.assertTrue(0.0 <= y0 < y1 <= 1.0, zone)
+                self.assertLess(y1 - y0, 0.05, 'строка ника узкая')
+
+    def test_hero_nick_zone_sits_above_stack_zone(self):
+        """Ник над суммой и не перекрывает её — иначе OCR читает «246.6 ББ»."""
+        nick, stack = config.NICK_ZONES[0], config.HERO_STACK_ZONE
+        self.assertLessEqual(nick[3], stack[1])
+        self.assertGreater(nick[3], stack[1] - 0.01, 'зона не должна отрываться от плашки')
+
+    def test_crop_stays_inside_any_frame(self):
+        """Вырезка не выходит за кадр ни для одного места, ни на одном размере."""
+        for w, h in ((400, 888), (1080, 2400), (720, 1600)):
+            img = cv2.imread(SHOTS[0])
+            img = cv2.resize(img, (w, h))
+            for seat in range(len(config.NICK_ZONES)):
+                with self.subTest(size=(w, h), seat=seat):
+                    patch = nr.crop_nick(img, seat)
+                    self.assertIsNotNone(patch)
+                    self.assertGreater(patch.size, 0)
+
+    def test_unknown_seat_has_no_zone(self):
+        for seat in (-1, 6, 99, None, 'x'):
+            self.assertIsNone(config.nick_zone(seat))
+            self.assertIsNone(nr.crop_nick(cv2.imread(SHOTS[0]), seat))
+
+    def test_hero_zone_lands_on_text_on_every_live_frame(self):
+        """На всех 32 живых кадрах в зоне героя есть светлый текст ника."""
+        for path in SHOTS:
+            with self.subTest(shot=os.path.basename(path)):
+                self.assertGreater(text_ink(nr.crop_nick(cv2.imread(path), 0)), 0.03)
+
+    def test_opponent_zone_lands_on_text_when_seat_is_taken(self):
+        """Место слева снизу занято почти всегда — там тоже должен быть текст."""
+        taken = [p for p in SHOTS if text_ink(nr.crop_nick(cv2.imread(p), 1)) > 0.05]
+        self.assertGreaterEqual(len(taken), 25, 'зона места 1 промахивается мимо ника')
+
+    def test_seat_at_recognises_own_plate(self):
+        """Плашка в центре своей зоны опознаётся как это же место."""
+        for seat, zone in enumerate(config.SEAT_ZONES):
+            with self.subTest(seat=seat):
+                x = (zone[0] + zone[2]) / 2 * 400
+                y = (zone[1] + zone[3]) / 2 * 888
+                self.assertEqual(config.seat_at(x, y, 400, 888), seat)
+
+    def test_seat_at_ignores_far_points(self):
+        self.assertIsNone(config.seat_at(200, 30, 400, 888))     # верх экрана
+        self.assertIsNone(config.seat_at(200, 460, 400, 888))    # центр стола
+
+
+class CleanTest(unittest.TestCase):
+    """Нормализация: что бы ни выдал OCR, в профиль попадает ник или None."""
+
+    def test_trims_and_collapses_spaces(self):
+        self.assertEqual(nr.clean_nick('  Poker   Pro \n'), 'Poker Pro')
+
+    def test_keeps_digits_underscore_and_dot(self):
+        # «EPT_38» — живой ник с кадра 20260818_133555
+        self.assertEqual(nr.clean_nick('EPT_38'), 'EPT_38')
+        self.assertEqual(nr.clean_nick('mr.big-1'), 'mr.big-1')
+
+    def test_keeps_cyrillic(self):
+        self.assertEqual(nr.clean_nick('Вася Петров'), 'Вася Петров')
+
+    def test_drops_single_junk_chars(self):
+        self.assertEqual(nr.clean_nick('|PokerPro88'), 'PokerPro88')
+        self.assertEqual(nr.clean_nick('Poker•Pro'), 'Poker Pro')
+        self.assertEqual(nr.clean_nick('_Ace_ '), 'Ace')
+
+    def test_all_junk_is_not_a_nick(self):
+        for garbage in ('|||', '~ ^ ` |', '...', '   ', '', None, '\x0c\n'):
+            with self.subTest(garbage=garbage):
+                self.assertIsNone(nr.clean_nick(garbage))
+
+    def test_mostly_junk_is_rejected(self):
+        """Зона попала на рамку/сукно: букв мало, мусора много — это не ник."""
+        self.assertIsNone(nr.clean_nick('|_|~a|_|~'))
+
+    def test_too_short_is_rejected(self):
+        self.assertIsNone(nr.clean_nick('a'))
+
+    def test_length_is_capped(self):
+        long = 'A' * 40
+        self.assertEqual(len(nr.clean_nick(long)), config.NICK_MAX_LEN)
+        self.assertEqual(len(nr.clean_nick(long, max_len=8)), 8)
+
+
+class ReadNickTest(unittest.TestCase):
+    """Чтение ника с живого кадра при подменённом запуске tesseract."""
+
+    def setUp(self):
+        self.img = cv2.imread(SHOTS[0])
+
+    def test_no_tesseract_means_no_ocr(self):
+        """tesseract=None — режим без OCR: ничего не запускаем и молчим."""
+        with mock.patch.object(nr, 'run_tesseract') as run:
+            self.assertIsNone(nr.read_nick(self.img, 0, tesseract=None))
+            run.assert_not_called()
+
+    def test_reads_and_cleans(self):
+        with ocr(' Robert  Nikson \n'):
+            self.assertEqual(nr.read_nick(self.img, 0, tesseract=EXE), 'Robert Nikson')
+
+    def test_ocr_failure_returns_none(self):
+        """Не запустился/упал/таймаут — None, а не исключение."""
+        with ocr(None):
+            self.assertIsNone(nr.read_nick(self.img, 0, tesseract=EXE))
+
+    def test_broken_exe_path_does_not_raise(self):
+        """Настоящий запуск несуществующего exe: None, цикл бота живёт дальше."""
+        self.assertIsNone(nr.run_tesseract(SHOTS[0], '/nope/tesseract-does-not-exist'))
+        self.assertIsNone(nr.read_nick(self.img, 0, tesseract='/nope/tesseract'))
+
+    def test_command_line_asks_for_one_line_of_eng_rus(self):
+        cmd = nr.tesseract_cmd(EXE, '/tmp/x.png')
+        self.assertEqual(cmd[:3], [EXE, '/tmp/x.png', 'stdout'])
+        self.assertIn('--psm', cmd)
+        self.assertEqual(cmd[cmd.index('--psm') + 1], '7')
+        self.assertEqual(cmd[cmd.index('-l') + 1], 'eng+rus')
+
+    def test_temp_file_is_removed(self):
+        before = set(glob.glob(os.path.join(nr.tempfile.gettempdir(), 'clubgg_nick_*')))
+        with ocr('Nick'):
+            nr.read_nick(self.img, 0, tesseract=EXE)
+        after = set(glob.glob(os.path.join(nr.tempfile.gettempdir(), 'clubgg_nick_*')))
+        self.assertEqual(before, after)
+
+    def test_prepare_inverts_and_upscales(self):
+        patch = nr.crop_nick(self.img, 0)
+        out = nr.prepare(patch, scale=2)
+        self.assertEqual(out.shape, (patch.shape[0] * 2, patch.shape[1] * 2))
+        self.assertGreater(out.mean(), 128, 'тёмный текст на светлом фоне')
+
+
+class ReadNicksTest(unittest.TestCase):
+    """Ники всех занятых мест: ключ — номер по кругу, зона — по месту на экране."""
+
+    def setUp(self):
+        self.img = cv2.imread(SHOTS[0])
+        self.h, self.w = self.img.shape[:2]
+
+    def seats(self, *zones):
+        """Плашки: герой + оппоненты в центрах перечисленных мест."""
+        out = [{'x': 0, 'y': 0, 'hero': True, 'in_hand': True}]
+        for z in zones:
+            zone = config.SEAT_ZONES[z]
+            out.append({'x': (zone[0] + zone[2]) / 2 * self.w,
+                        'y': (zone[1] + zone[3]) / 2 * self.h,
+                        'hero': False, 'in_hand': True})
+        return out
+
+    def test_keys_are_circle_order_not_screen_place(self):
+        """Оппонент, сидящий справа снизу (место 5), — это «Оппонент 1» по кругу."""
+        seen = []
+        with mock.patch.object(nr, 'read_nick',
+                               lambda img, seat, **kw: seen.append(seat) or 'Nick'):
+            nicks = nr.read_nicks(self.img, self.seats(5, 2), tesseract=EXE)
+        self.assertEqual(sorted(nicks), [1, 2])       # ключи — номера по кругу
+        self.assertEqual(sorted(seen), [2, 5])        # зоны — места на экране
+
+    def test_hero_is_skipped(self):
+        with mock.patch.object(nr, 'read_nick', return_value='Nick') as read:
+            nr.read_nicks(self.img, self.seats(1), tesseract=EXE)
+        self.assertEqual(read.call_count, 1)
+
+    def test_unreadable_seat_is_absent(self):
+        with mock.patch.object(nr, 'read_nick', return_value=None):
+            self.assertEqual(nr.read_nicks(self.img, self.seats(1), tesseract=EXE), {})
+
+    def test_no_tesseract_no_calls(self):
+        with mock.patch.object(nr, 'read_nick') as read:
+            self.assertEqual(nr.read_nicks(self.img, self.seats(1), tesseract=None), {})
+        read.assert_not_called()
+
+    def test_empty_table_is_not_scanned(self):
+        with mock.patch.object(nr, 'read_nick') as read:
+            self.assertEqual(nr.read_nicks(self.img, [], tesseract=EXE), {})
+        read.assert_not_called()
+
+
+class MergeTest(unittest.TestCase):
+    """Слияние: накопленное на «Оппоненте N» достаётся человеку, а не стулу."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix='clubgg_nick_')
+        self.p = opponents.Profiles(path=os.path.join(tmp, 'players.json'), db={})
+
+    def seat_stats(self, hands=10, **kw):
+        rec = opponents.blank(opponents.SEAT_NOTE)
+        rec.update({'hands': hands, 'vpip_hands': 6, 'pfr_hands': 3,
+                    'three_bet_spots': 4, 'three_bet_hands': 1,
+                    'agg_bets': 8, 'agg_calls': 4, 'first_seen': '2026-01-01',
+                    'last_seen': '2026-02-01'})
+        rec.update(kw)
+        self.p.db['Оппонент 3'] = rec
+        return rec
+
+    def test_counters_move_and_source_disappears(self):
+        self.seat_stats()
+        self.assertEqual(self.p.merge('Оппонент 3', 'PokerPro88'), 10)
+        self.assertNotIn('Оппонент 3', self.p.db)
+        got = self.p.db['PokerPro88']
+        self.assertEqual(got['hands'], 10)
+        self.assertEqual(got['vpip_hands'], 6)
+        self.assertEqual(got['agg_bets'], 8)
+        self.assertEqual(got['vpip'], 0.6)
+        self.assertEqual(got['agg'], 2.0)
+        self.assertEqual(got['first_seen'], '2026-01-01')
+
+    def test_counters_add_up_to_existing_nick_profile(self):
+        """Ник уже знаком (тот же человек за другим столом) — цифры складываются."""
+        self.p.update('PokerPro88', {'vpip': True, 'bets': 2, 'passive': 1})
+        self.seat_stats(hands=10)
+        self.p.merge('Оппонент 3', 'PokerPro88')
+        got = self.p.db['PokerPro88']
+        self.assertEqual(got['hands'], 11)
+        self.assertEqual(got['vpip_hands'], 7)
+        self.assertEqual(got['agg_bets'], 10)
+
+    def test_hand_written_data_is_not_lost(self):
+        """У места есть лики/fold_to_3bet — запись остаётся, но руки не двоятся."""
+        self.seat_stats(leaks=['коллит слишком много'], fold_to_3bet=0.4)
+        self.p.merge('Оппонент 3', 'PokerPro88')
+        old = self.p.db['Оппонент 3']
+        self.assertEqual(old['merged_into'], 'PokerPro88')
+        self.assertEqual(old['hands'], 0)
+        self.assertEqual(old['leaks'], ['коллит слишком много'])
+        self.assertEqual(self.p.db['PokerPro88']['hands'], 10)
+
+    def test_merged_record_is_hidden_from_panel_and_merged_once(self):
+        self.seat_stats(leaks=['лик'])
+        self.p.merge('Оппонент 3', 'PokerPro88')
+        self.assertEqual(self.p.merge('Оппонент 3', 'PokerPro88'), 0)
+        self.assertEqual(self.p.db['PokerPro88']['hands'], 10)
+        self.assertEqual([o['name'] for o in self.p.opponents()], ['PokerPro88'])
+
+    def test_nothing_to_merge(self):
+        self.assertEqual(self.p.merge('Оппонент 3', 'PokerPro88'), 0)
+        self.assertNotIn('PokerPro88', self.p.db)
+
+    def test_merge_into_itself_is_noop(self):
+        self.seat_stats()
+        self.assertEqual(self.p.merge('Оппонент 3', 'Оппонент 3'), 0)
+        self.assertEqual(self.p.db['Оппонент 3']['hands'], 10)
+
+    def test_update_all_names_profiles_by_nick(self):
+        observed = {1: {'vpip': True}, 2: {'vpip': False}}
+        names = self.p.update_all(observed, nicks={1: 'PokerPro88'})
+        self.assertEqual(names, ['PokerPro88', 'Оппонент 2'])
+        self.assertEqual(self.p.db['PokerPro88']['notes'], opponents.NICK_NOTE)
+        self.assertEqual(self.p.db['Оппонент 2']['notes'], opponents.SEAT_NOTE)
+
+    def test_update_all_without_nicks_keeps_old_behaviour(self):
+        self.assertEqual(self.p.update_all({1: {'vpip': True}}), ['Оппонент 1'])
+
+
+class BotNickTest(unittest.TestCase):
+    """Бот: раз в раздачу, кэш, лог, флаг read_nicks."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='clubgg_nick_')
+        self.bot = Bot(mock.Mock(), dry_run=True, players_db={},
+                       players_path=os.path.join(self.tmp, 'players.json'),
+                       log_path=os.path.join(self.tmp, 'bot.log'),
+                       history_path=os.path.join(self.tmp, 'h.jsonl'))
+        self.bot.tesseract = EXE
+        self.lines = []
+        self.bot.log = self.lines.append
+        self.img = cv2.imread(SHOTS[0])
+
+    def state(self, seated=2):
+        return state(seated=seated)
+
+    def read(self, nicks):
+        return mock.patch.object(nr, 'read_nicks', return_value=dict(nicks))
+
+    def test_flag_off_keeps_seat_names(self):
+        self.bot.read_nicks = False
+        with mock.patch.object(nr, 'read_nicks') as read:
+            self.assertEqual(self.bot.update_nicks(self.img, self.state()), {})
+        read.assert_not_called()
+        self.assertEqual(self.bot.profiles.update_all({1: {'vpip': True}},
+                                                      nicks=self.bot.nicks),
+                         ['Оппонент 1'])
+
+    def test_nick_is_logged_and_stats_are_moved(self):
+        self.bot.profiles.update('Оппонент 1', {'vpip': True})
+        with self.read({1: 'PokerPro88'}):
+            nicks = self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertEqual(nicks, {1: 'PokerPro88'})
+        self.assertIn('оппонент на месте 1 → ник "PokerPro88" '
+                      '(статистика перенесена: 1 рука)', self.lines)
+        self.assertNotIn('Оппонент 1', self.bot.players_db)
+        self.assertEqual(self.bot.players_db['PokerPro88']['hands'], 1)
+
+    def test_unreadable_nick_is_logged_once(self):
+        with self.read({}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertEqual(self.lines,
+                         ['ник на месте 1 не прочитался — Оппонент 1 (место)'])
+
+    def test_nick_is_logged_once_per_change(self):
+        with self.read({1: 'PokerPro88'}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertEqual(len(self.lines), 1)
+
+    def test_cache_survives_a_hand_the_ocr_missed(self):
+        """Смайлик закрыл плашку — ник берётся из прошлой раздачи, не теряется."""
+        with self.read({1: 'PokerPro88'}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        with self.read({}):
+            nicks = self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertEqual(nicks, {1: 'PokerPro88'})
+
+    def test_empty_seat_drops_the_cache(self):
+        """Место опустело — там сядет другой человек, старый ник не наследуем."""
+        with self.read({1: 'PokerPro88'}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        with self.read({}):
+            self.assertEqual(self.bot.update_nicks(self.img, self.state(seated=0)), {})
+            self.assertEqual(self.bot.update_nicks(self.img, self.state(seated=1)), {})
+
+    def test_reader_failure_does_not_break_the_hand(self):
+        with mock.patch.object(nr, 'read_nicks', side_effect=RuntimeError('boom')):
+            self.assertEqual(self.bot.update_nicks(self.img, self.state()), {})
+        self.assertTrue(any('ники не прочитаны' in s for s in self.lines))
+
+    def test_saved_profile_gets_the_nick(self):
+        with self.read({1: 'PokerPro88'}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        self.bot.save_profiles({1: {'vpip': True, 'bets': 0, 'passive': 0}})
+        self.assertIn('PokerPro88', self.bot.players_db)
+
+    def test_flag_is_reported_in_history(self):
+        self.bot.read_nicks = True
+        self.assertIn('read_nicks', self.bot.active_flags())
+        self.bot.read_nicks = False
+        self.assertNotIn('read_nicks', self.bot.active_flags())
+
+    def test_devices_json_switches_the_flag(self):
+        self.bot.apply_config({'read_nicks': False})
+        self.assertFalse(self.bot.read_nicks)
+        self.bot.apply_config({})
+        self.assertTrue(self.bot.read_nicks)          # по умолчанию включено
+        self.bot.apply_config({'tesseract': '/opt/tesseract'})
+        self.assertEqual(self.bot.tesseract, '/opt/tesseract')
+
+
+if __name__ == '__main__':
+    unittest.main()

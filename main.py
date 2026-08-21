@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 
 import config
+import nick_reader
 import opponents
 import table_state as ts
 import strategy
@@ -138,6 +139,10 @@ class Bot:
         self.observer = opponents.HandObserver()
         self.opponent_memory = True     # флаг opponent_memory (панель)
         self.human_timing = True        # флаг human_timing (панель)
+        self.read_nicks = True          # флаг read_nicks: ники с экрана (панель)
+        self.tesseract = config.TESSERACT
+        self.nicks = {}                 # место по кругу -> ник этой раздачи (кэш)
+        self._nick_seen = {}            # что уже писали в лог по каждому месту
         self.timing = dict(config.TIMING_DEFAULTS)
         self.style = strategy.DEFAULT_STYLE
         self._turn_sig = None           # сигнатура хода, который сейчас на экране
@@ -281,7 +286,8 @@ class Bot:
         if not self.opponent_memory:
             return None
         others = [v for k, v in self.players_db.items()
-                  if isinstance(v, dict) and k != config.HERO_NAME]
+                  if isinstance(v, dict) and k != config.HERO_NAME
+                  and not v.get('merged_into')]
         return others[0] if len(others) == 1 else None
 
     # ---------- память оппонентов ----------
@@ -303,13 +309,60 @@ class Bot:
 
     def save_profiles(self, observed):
         """Итог раздачи -> players.json. Возвращает имена обновлённых профилей."""
-        names = self.profiles.update_all(observed)
+        names = self.profiles.update_all(observed, nicks=self.nicks)
         if not self.profiles.save():
             self.log('память оппонентов: players.json не записан')
         for name in names:
             self.log('память оппонентов: '
                      + opponents.summary_line(name, self.players_db[name]))
         return names
+
+    # ---------- ники оппонентов ----------
+    def update_nicks(self, img, state=None):
+        """Прочитать ники занятых мест. {место по кругу от героя: ник}.
+
+        Зовётся РАЗ В РАЗДАЧУ (там же, где update_stack): каждый вызов — запуск
+        tesseract на каждое занятое место, на кадр этого не напасёшься, а внутри
+        раздачи ники не меняются.
+
+        Место, ник которого в этот раз не прочитался (смайлик закрыл плашку,
+        всплыл ярлык действия), берёт ник из прошлой раздачи. Кэш живёт, пока
+        место занято: опустело — забываем, там сядет уже другой человек.
+        """
+        if not self.read_nicks or img is None:
+            self.nicks = {}
+            return self.nicks
+        seats = (state or {}).get('seats') or []
+        try:
+            fresh = nick_reader.read_nicks(img, seats, tesseract=self.tesseract)
+        except Exception as e:                   # чтение кадра не должно ронять ход
+            self.log(f'ники не прочитаны ({type(e).__name__}: {e}) — играю по местам')
+            return self.nicks
+        occupied = range(1, sum(1 for s in seats if not s.get('hero')) + 1)
+        nicks, merged = {}, False
+        for seat in occupied:
+            nick = fresh.get(seat) or self.nicks.get(seat)
+            if nick:
+                nicks[seat] = nick
+            if self._nick_seen.get(seat) == (nick or ''):
+                continue                         # об этом месте уже говорили
+            self._nick_seen[seat] = nick or ''
+            if not nick:
+                self.log(f'ник на месте {seat} не прочитался — '
+                         f'{opponents.seat_name(seat)} (место)')
+                continue
+            moved = (self.profiles.merge(opponents.seat_name(seat), nick)
+                     if self.opponent_memory else 0)
+            merged = merged or bool(moved)
+            note = (f' (статистика перенесена: {moved} {opponents.hands_word(moved)})'
+                    if moved else '')
+            self.log(f'оппонент на месте {seat} → ник "{nick}"{note}')
+        for seat in [s for s in self._nick_seen if s not in occupied]:
+            self._nick_seen.pop(seat, None)      # место опустело — говорим заново
+        if merged and not self.profiles.save():
+            self.log('память оппонентов: players.json не записан')
+        self.nicks = nicks
+        return nicks
 
     def log_memory(self):
         """Что бот помнит об оппонентах — строкой на старте сессии."""
@@ -402,6 +455,8 @@ class Bot:
         self.live_stack = bool(cfg.get('live_stack', True))
         self.opponent_memory = bool(cfg.get('opponent_memory', True))
         self.human_timing = bool(cfg.get('human_timing', True))
+        self.read_nicks = bool(cfg.get('read_nicks', True))
+        self.tesseract = cfg.get('tesseract') or config.TESSERACT
         self.timing = timing_ranges(cfg)
         stack = cfg.get('stack')
         if stack:
@@ -654,6 +709,9 @@ class Bot:
             # стека = алл-ин» и имплайд-оддсы должны считаться от правды, а не
             # от константы, записанной в панели один раз
             self.update_stack(img)
+            # и ники: профиль должен держаться за человека, а не за место —
+            # иначе пересевший игрок заводит себе второй профиль
+            self.update_nicks(img, state)
 
         decision = self.decide(state)
         # свёрнутый столбец ставки: сначала раскрыть его шевроном, потом решать
@@ -906,6 +964,9 @@ def main(argv=None):
                     help='не копить статистику оппонентов и не подстраиваться под неё')
     ap.add_argument('--no-human-timing', action='store_true',
                     help='без человечных пауз перед тапом (действовать сразу)')
+    ap.add_argument('--no-nicks', action='store_true',
+                    help='не читать ники с экрана (звать оппонентов по местам)')
+    ap.add_argument('--tesseract', help=f'путь к tesseract.exe (по умолчанию {config.TESSERACT})')
     ap.add_argument('--max-actions', type=int, help='сыграть N решений и выйти')
     ap.add_argument('--adb', help=f'путь к adb (по умолчанию {config.ADB})')
     ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
@@ -938,7 +999,9 @@ def main(argv=None):
                'defense': args.defense, 'stack': args.stack,
                'live_stack': not args.no_live_stack,
                'opponent_memory': not args.no_memory,
-               'human_timing': not args.no_human_timing}
+               'human_timing': not args.no_human_timing,
+               'read_nicks': not args.no_nicks,
+               'tesseract': args.tesseract or config.TESSERACT}
     print(f'настройки: стиль {args.style}, агрессия x{args.aggression}, '
           f'защита x{args.defense}')
 

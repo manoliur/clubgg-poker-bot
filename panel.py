@@ -48,10 +48,13 @@ FLAGS = [
 # сам обновляет поле stack; выключено — играет по числу из панели, как раньше.
 # opponent_memory: копить статистику оппонентов и подстраиваться под неё.
 # human_timing: случайная пауза «раздумья» перед тапом.
+# read_nicks: читать ники с плашек (нужен tesseract); выключено — оппоненты
+# зовутся по местам («Оппонент 2»), как было раньше.
 BOT_FLAGS = [
     ('live_stack', 'Живой стек — читать с экрана'),
     ('opponent_memory', 'Память оппонентов — статистика'),
     ('human_timing', 'Человечные паузы перед ходом'),
+    ('read_nicks', 'Ники оппонентов — читать с экрана'),
 ]
 BOT_FLAG_KEYS = [f[0] for f in BOT_FLAGS]
 
@@ -267,6 +270,10 @@ class BotManager:
             cmd += ['--no-memory']
         if not d.get('human_timing', True):
             cmd += ['--no-human-timing']
+        if not d.get('read_nicks', True):
+            cmd += ['--no-nicks']
+        if d.get('tesseract'):
+            cmd += ['--tesseract', str(d['tesseract'])]
         if d.get('name'):
             cmd += ['--name', d['name']]
         f = open(log_path, 'a', encoding='utf-8')

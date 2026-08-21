@@ -14,14 +14,16 @@
   ререйз. Считается долей от «спотов» — раздач, где мы вообще открывали рейзом;
 * agg — постфлоп: ставка/рейз оппонента против его же чеков и коллов (AF).
 
-Кто именно сыграл, видно только когда в раздаче ОДИН оппонент: имён и чужих
-кнопок в кадре нет. При нескольких оппонентах копится лишь VPIP (он читается по
-их картам на столе), а ставки не приписываются никому.
+Кто именно сыграл, видно только когда в раздаче ОДИН оппонент: чужих кнопок в
+кадре нет. При нескольких оппонентах копится лишь VPIP (он читается по их
+картам на столе), а ставки не приписываются никому.
 
-Оппонент опознаётся местом по кругу от героя («Оппонент 1» — следующий по
-часовой стрелке): читать ники бот не умеет. Если игрок встал из-за стола, места
-за ним сдвигаются — статистика такого места смешается. Это цена того, что имён
-у нас нет; для кэша с постоянным составом стола оценка рабочая.
+Профиль называется НИКОМ, прочитанным с плашки игрока (nick_reader). Ник не
+прочитался (смайлик закрыл плашку, OCR выключен, мусор) — падаем на старое имя
+по месту, «Оппонент 1» (следующий по часовой от героя). Место — плохой ключ:
+стоит игроку встать, и места за ним сдвигаются, смешивая статистику разных
+людей; поэтому как только ник на месте прочитан, накопленное «Оппонентом N»
+переносится в профиль с ником (Profiles.merge).
 """
 import datetime
 import json
@@ -43,12 +45,19 @@ COUNTERS = ('vpip_hands', 'pfr_hands', 'three_bet_hands', 'three_bet_spots',
             'agg_bets', 'agg_calls')
 
 
-SEAT_NOTE = 'место по кругу от героя (ников бот не читает)'
+SEAT_NOTE = 'место по кругу от героя (ник не прочитался)'
+NICK_NOTE = 'ник прочитан с экрана'
 
 
 def seat_name(i):
     """Имя оппонента по месту: i — номер по часовой стрелке от героя (1..5)."""
     return f'Оппонент {i}'
+
+
+def player_name(seat, nick=None):
+    """Имя профиля: ник, если он прочитался, иначе — место по кругу."""
+    nick = (nick or '').strip()
+    return nick or seat_name(seat)
 
 
 def blank(notes=''):
@@ -135,20 +144,64 @@ class Profiles:
         p['last_seen'] = datetime.date.today().isoformat()
         return _derive(p)
 
-    def update_all(self, observed):
-        """Итог раздачи (место -> наблюдения) -> профили. Возвращает имена."""
+    def update_all(self, observed, nicks=None):
+        """Итог раздачи (место -> наблюдения) -> профили. Возвращает имена.
+
+        nicks — {место: ник}, прочитанное с экрана в этой раздаче. Места, ника
+        которых там нет, пишутся по-старому, под именем места.
+        """
+        nicks = nicks or {}
         names = []
         for seat, obs in sorted(observed.items()):
-            self.update(seat_name(seat), obs, notes=SEAT_NOTE)
-            names.append(seat_name(seat))
+            nick = nicks.get(seat)
+            name = player_name(seat, nick)
+            self.update(name, obs, notes=NICK_NOTE if nick else SEAT_NOTE)
+            names.append(name)
         return names
+
+    def merge(self, src, dst):
+        """Перенести статистику профиля src в профиль dst. Возвращает: рук перенесено.
+
+        Так «Оппонент 3», накопленный до того, как ник прочитался, достаётся
+        человеку, а не стулу. Складываются счётчики (доли из них считаются
+        заново), first_seen берётся ранний, last_seen — поздний.
+
+        Запись src удаляется, только если в ней нет ничего, кроме перенесённого:
+        заметки, найденные лики и fold_to_3bet вписаны руками и в счётчики не
+        входят — такую запись оставляем, но обнуляем перенесённое, чтобы руки не
+        посчитались дважды, и помечаем merged_into.
+        """
+        src_p = self.db.get(src)
+        if src == dst or not isinstance(src_p, dict) or src_p.get('merged_into'):
+            return 0
+        _seed(src_p)
+        moved = int(src_p.get('hands') or 0)
+        p = self.profile(dst, create=True, notes=NICK_NOTE)
+        p['hands'] = int(p.get('hands') or 0) + moved
+        for key in COUNTERS:
+            p[key] = int(p.get(key) or 0) + int(src_p.get(key) or 0)
+        first = src_p.get('first_seen')
+        if first and (not p.get('first_seen') or first < p['first_seen']):
+            p['first_seen'] = first
+        last = src_p.get('last_seen')
+        if last and last > (p.get('last_seen') or ''):
+            p['last_seen'] = last
+        _derive(p)
+        if src_p.get('leaks') or src_p.get('fold_to_3bet') is not None:
+            src_p['hands'] = 0
+            src_p.update({k: 0 for k in COUNTERS})
+            src_p['merged_into'] = dst
+            _derive(src_p)
+        else:
+            self.db.pop(src, None)
+        return moved
 
     def opponents(self, hero=None):
         """Профили всех, кроме героя — для панели и стартового лога."""
         hero = hero or config.HERO_NAME
         out = []
         for name, p in self.db.items():
-            if name == hero or not isinstance(p, dict):
+            if name == hero or not isinstance(p, dict) or p.get('merged_into'):
                 continue
             out.append({'name': name, 'hands': int(p.get('hands') or 0),
                         'vpip': p.get('vpip') or 0.0, 'pfr': p.get('pfr') or 0.0,
