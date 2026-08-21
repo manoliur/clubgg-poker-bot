@@ -333,6 +333,12 @@ class Bot:
         Место, ник которого в этот раз не прочитался (смайлик закрыл плашку,
         всплыл ярлык действия), берёт ник из прошлой раздачи. Кэш живёт, пока
         место занято: опустело — забываем, там сядет уже другой человек.
+
+        Тот же кэш решает и спор написаний. Пока место не пустело, за ним сидит
+        ТОТ ЖЕ человек, как бы OCR ни прочитал его ник в этот раз: «INeedAHero»
+        и «МеедАНего» — одна плашка, прочитанная то латиницей, то кириллицей, и
+        по буквам они не похожи совсем. Такое написание уходит в aliases профиля
+        из кэша, а нового профиля не заводится.
         """
         if not self.read_nicks or img is None:
             self.nicks = {}
@@ -347,8 +353,9 @@ class Bot:
         nicks, merged = {}, False
         for seat in occupied:
             nick = fresh.get(seat) or self.nicks.get(seat)
-            if nick:
-                nicks[seat] = nick
+            name, note = self.same_player(seat, nick)
+            if name:
+                nicks[seat] = name
             if self._nick_seen.get(seat) == (nick or ''):
                 continue                         # об этом месте уже говорили
             self._nick_seen[seat] = nick or ''
@@ -356,12 +363,13 @@ class Bot:
                 self.log(f'ник на месте {seat} не прочитался — '
                          f'{opponents.seat_name(seat)} (место)')
                 continue
-            moved = (self.profiles.merge(opponents.seat_name(seat), nick)
+            moved = (self.profiles.merge(opponents.seat_name(seat), name)
                      if self.opponent_memory else 0)
-            merged = merged or bool(moved)
-            note = (f' (статистика перенесена: {moved} {opponents.hands_word(moved)})'
+            # алиас дописан в профиль — базу тоже надо сохранить
+            merged = merged or bool(moved) or bool(note and self.opponent_memory)
+            tail = (f' (статистика перенесена: {moved} {opponents.hands_word(moved)})'
                     if moved else '')
-            self.log(f'оппонент на месте {seat} → ник "{nick}"{note}')
+            self.log((note or f'оппонент на месте {seat} → ник "{name}"') + tail)
         for seat in [s for s in self._nick_seen if s not in occupied]:
             self._nick_seen.pop(seat, None)      # место опустело — говорим заново
         if merged and not self.profiles.save():
@@ -369,11 +377,55 @@ class Bot:
         self.nicks = nicks
         return nicks
 
+    def same_player(self, seat, nick):
+        """Ник с плашки -> (имя профиля, строка в лог о переклейке имени).
+
+        Имя профиля — не всегда сам ник: OCR путает буквы, и «TNeedAHero» должен
+        попасть в статистику «INeedAHero», а не завести второго. Кто это,
+        решается по двум признакам, кэш места сильнее:
+
+        * место не пустело с прошлой раздачи — там тот же человек, как бы ни
+          прочиталась плашка в этот раз (кириллица вместо латиницы — ники не
+          похожи вовсе, а игрок один);
+        * иначе — нестрогое сравнение с уже известными никами (Profiles.resolve).
+        """
+        if not nick:
+            return None, ''
+        name, score = self.profiles.resolve(nick)
+        prev = self.nicks.get(seat)
+        if prev and prev != name:
+            name = self.profiles.canonical(prev)
+            added = self.profiles.add_alias(name, nick)
+            return name, (f'место {seat}: ник "{nick}" → тот же игрок (кэш места), '
+                          f'статистика в "{name}"'
+                          + (' (алиас добавлен)' if added else ''))
+        if score and name != nick:
+            return name, (f'ник "{opponents.norm_nick(nick)}" похож на "{name}" '
+                          f'({opponents.ratio_str(score)}) — статистика туда')
+        return name, ''
+
+    def dedupe_profiles(self):
+        """Слить в players.json разные написания одного ника (старт сессии).
+
+        Дубли накопились, пока бот сравнивал ники буква в букву; сливаем их один
+        раз при чтении базы, чтобы дальше играть против одного профиля.
+        """
+        if not self.opponent_memory:
+            return []
+        moves = self.profiles.merge_duplicates()
+        for src, dst, moved, _score in moves:
+            self.log(f'слиты дубли: "{src}" -> "{dst}" '
+                     f'({moved} {opponents.hands_word(moved)})')
+        if moves and not self.profiles.save():
+            self.log('память оппонентов: players.json не записан')
+        return moves
+
     def log_memory(self):
         """Что бот помнит об оппонентах — строкой на старте сессии."""
         if not self.opponent_memory:
             self.log('память оппонентов: выключена (флаг opponent_memory)')
             return []
+        self.dedupe_profiles()
         rows = self.profiles.opponents()
         if not rows:
             self.log('память оппонентов: профилей пока нет — копим с первой раздачи')

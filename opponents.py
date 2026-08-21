@@ -24,10 +24,19 @@
 стоит игроку встать, и места за ним сдвигаются, смешивая статистику разных
 людей; поэтому как только ник на месте прочитан, накопленное «Оппонентом N»
 переносится в профиль с ником (Profiles.merge).
+
+Ник с экрана читается с вариациями: «INeedAHero» и «TNeedAHero» (I опознано как
+T), «МеедАНего» и «Г еедАНего» (смайлик закрыл букву). Чтобы один игрок не
+рассыпался на пять профилей, ники сравниваются нормализованными (norm_nick) и
+нестрого (similar): похожие на 0.8 и выше — тот же человек, новое написание
+уходит в его aliases (Profiles.resolve), а уже накопившиеся дубли сливаются при
+старте сессии (Profiles.merge_duplicates).
 """
 import datetime
+import difflib
 import json
 import os
+import re
 
 import config
 
@@ -53,10 +62,59 @@ ACTION_COUNTERS = ('vpip_hands', 'pfr_hands', 'three_bet_hands',
 SEAT_NOTE = 'место по кругу от героя (ник не прочитался)'
 NICK_NOTE = 'ник прочитан с экрана'
 
+# Символы, которые OCR ставит и теряет как попало: пробел вокруг закрытой смайлом
+# буквы, разделители внутри ника. На то, ЧЕЙ это ник, они не влияют.
+NICK_JUNK = ' _-.|•'
+
+# Похожесть нормализованных ников, с которой это уже один игрок. 0.8 — одна
+# перепутанная буква из пяти; ниже начинают склеиваться разные ники.
+NICK_RATIO = 0.8
+
+# Короче этого сравнивать нестрого нельзя: у «Ace1» и «Ace2» похожесть 0.75, а
+# это разные люди. Короткие ники — только точное совпадение (после нормализации).
+NICK_MIN_LEN = 6
+
+SEAT_RE = re.compile(r'^Оппонент\s+\d+$')
+
 
 def seat_name(i):
     """Имя оппонента по месту: i — номер по часовой стрелке от героя (1..5)."""
     return f'Оппонент {i}'
+
+
+def is_seat_name(name):
+    """«Оппонент 3» — это не ник, а место: в сравнении ников не участвует."""
+    return bool(SEAT_RE.match((name or '').strip()))
+
+
+def norm_nick(name):
+    """Ник -> ключ сравнения: нижний регистр без пробелов и мусорных символов.
+
+    «Г еедАНего» и «ГеедАНего» — один ключ: лишний пробел OCR выдумал сам.
+    """
+    text = ''.join(ch for ch in str(name or '') if ch not in NICK_JUNK)
+    return text.strip().lower()
+
+
+def similar(a, b):
+    """Похожесть двух ников, 0..1 (по нормализованным ключам).
+
+    Точный ключ — 1.0. Короткие ники (меньше NICK_MIN_LEN) сравниваются только
+    точно: у них любая опечатка съедает слишком большую долю имени.
+    """
+    ka, kb = norm_nick(a), norm_nick(b)
+    if not ka or not kb:
+        return 0.0
+    if ka == kb:
+        return 1.0
+    if min(len(ka), len(kb)) < NICK_MIN_LEN:
+        return 0.0
+    return round(difflib.SequenceMatcher(None, ka, kb).ratio(), 3)
+
+
+def ratio_str(ratio):
+    """0.9 -> «0.9», 0.833 -> «0.83» — похожесть в лог без хвоста нулей."""
+    return f'{round(float(ratio), 2):g}'
 
 
 def player_name(seat, nick=None):
@@ -73,8 +131,15 @@ def blank(notes=''):
     return p
 
 
-def _seed(p):
-    """Дописать счётчики в запись, сделанную старой версией (доли -> руки)."""
+def _seed(p, name=None):
+    """Дописать счётчики в запись, сделанную старой версией (доли -> руки).
+
+    name — под каким именем запись лежит в базе: у профиля с ником заодно
+    появляются ключ сравнения (nick_key) и список вариантов написания (aliases).
+    """
+    if name and not is_seat_name(name):
+        p['nick_key'] = norm_nick(name)
+        p.setdefault('aliases', [])
     hands = int(p.get('hands') or 0)
     for key, share in (('vpip_hands', 'vpip'), ('pfr_hands', 'pfr')):
         if key not in p:
@@ -164,7 +229,116 @@ class Profiles:
             if not create:
                 return None
             p = self.db[name] = blank(notes)
-        return _seed(p)
+        return _seed(p, name)
+
+    # ---------- один игрок под разными написаниями ----------
+    def nicks(self):
+        """Профили, за которыми стоит ник живого человека: [(имя, запись)].
+
+        Мимо: герой, места («Оппонент N» — это стул), уже слитые записи и
+        посторонние ключи файла (_comment).
+        """
+        out = []
+        for name, p in self.db.items():
+            if not isinstance(p, dict) or name == config.HERO_NAME:
+                continue
+            if is_seat_name(name) or p.get('merged_into'):
+                continue
+            out.append((name, p))
+        return out
+
+    def canonical(self, name, depth=4):
+        """Куда переехала запись: имя профиля, в который её слили (или она сама)."""
+        seen = set()
+        while isinstance(self.db.get(name), dict) and depth > 0:
+            nxt = self.db[name].get('merged_into')
+            if not nxt or nxt in seen:
+                break
+            seen.add(name)
+            name, depth = nxt, depth - 1
+        return name
+
+    def match(self, nick, ratio=NICK_RATIO):
+        """Профиль того же игрока под другим написанием: (имя, похожесть).
+
+        Сравнивается нормализованный ник — и с именем профиля, и со всеми уже
+        записанными вариантами (aliases). Не нашли похожего — (None, 0.0).
+        """
+        nick = (nick or '').strip()
+        if not nick or is_seat_name(nick):
+            return None, 0.0
+        if isinstance(self.db.get(nick), dict):
+            return nick, 1.0
+        best, score = None, 0.0
+        for name, p in self.nicks():
+            near = similar(nick, name)
+            for alias in p.get('aliases') or []:
+                near = max(near, similar(nick, alias))
+            if near > score:
+                best, score = name, near
+        return (best, score) if score >= ratio else (None, 0.0)
+
+    def add_alias(self, name, nick):
+        """Записать вариант написания в профиль. True — вариант там новый."""
+        p = self.db.get(name)
+        nick = (nick or '').strip()
+        if not isinstance(p, dict) or not nick or is_seat_name(nick):
+            return False
+        key = norm_nick(nick)
+        if not key or key == norm_nick(name):
+            return False
+        aliases = p.setdefault('aliases', [])
+        if any(norm_nick(a) == key for a in aliases):
+            return False
+        aliases.append(nick)
+        return True
+
+    def resolve(self, nick):
+        """Ник с экрана -> (имя профиля, похожесть), куда писать статистику.
+
+        Ник уже знаком или похож на знакомый — возвращается ИМЯ ТОГО профиля, а
+        новое написание уходит в его aliases: OCR путает буквы, а игрок за столом
+        один. Похожего нет — (сам ник, 0.0), это новый человек.
+        """
+        nick = (nick or '').strip()
+        name, score = self.match(nick)
+        if not name:
+            return nick, 0.0
+        name = self.canonical(name)
+        if name != nick:
+            self.add_alias(name, nick)
+        return name, score
+
+    def merge_duplicates(self, ratio=NICK_RATIO):
+        """Слить в базе разные написания одного ника. [(откуда, куда, рук, ratio)].
+
+        Зовётся на старте сессии: дубли могли накопиться до того, как бот научился
+        сравнивать ники нестрого. Остаётся запись с бОльшим числом рук (при
+        равенстве — первая по алфавиту), остальные вливаются в неё.
+        """
+        moves = []
+        for _ in range(len(self.db)):
+            pair = self._duplicate(ratio)
+            if not pair:
+                break
+            src, dst, score = pair
+            moves.append((src, dst, self.merge(src, dst), score))
+        return moves
+
+    def _duplicate(self, ratio):
+        """Первая найденная пара похожих профилей: (откуда, куда, похожесть)."""
+        rows = sorted(self.nicks(),
+                      key=lambda kv: (-int(kv[1].get('hands') or 0), kv[0]))
+        for i, (dst, dp) in enumerate(rows):
+            for src, sp in rows[i + 1:]:
+                near = similar(dst, src)
+                for a in (dp.get('aliases') or []):
+                    near = max(near, similar(a, src))
+                for b in (sp.get('aliases') or []):
+                    near = max(near, similar(dst, b))
+                if near >= ratio:
+                    return src, dst, near
+        return None
 
     def update(self, name, obs, notes=''):
         """Учесть одну раздачу. obs — итог HandObserver для этого оппонента."""
@@ -196,6 +370,8 @@ class Profiles:
         names, self.dropped = [], []
         for seat, obs in sorted(observed.items()):
             nick = nicks.get(seat)
+            if nick:
+                nick = self.resolve(nick)[0]     # другое написание знакомого ника
             name = player_name(seat, nick)
             known = self.profile(name)          # заодно дописывает счётчики
             if not nick and not showed_up(obs) and is_ghost(known):
@@ -232,6 +408,10 @@ class Profiles:
         человеку, а не стулу. Складываются счётчики (доли из них считаются
         заново), first_seen берётся ранний, last_seen — поздний.
 
+        Имя src и его варианты написания достаются dst в aliases: тот же OCR
+        прочитает ник так же и в следующий раз, и статистика должна лечь туда же,
+        а не завести дубль заново.
+
         Запись src удаляется, только если в ней нет ничего, кроме перенесённого:
         заметки, найденные лики и fold_to_3bet вписаны руками и в счётчики не
         входят — такую запись оставляем, но обнуляем перенесённое, чтобы руки не
@@ -240,10 +420,12 @@ class Profiles:
         src_p = self.db.get(src)
         if src == dst or not isinstance(src_p, dict) or src_p.get('merged_into'):
             return 0
-        _seed(src_p)
+        _seed(src_p, src)
         moved = int(src_p.get('hands') or 0)
         p = self.profile(dst, create=True, notes=NICK_NOTE)
         p['hands'] = int(p.get('hands') or 0) + moved
+        for alias in [src] + list(src_p.get('aliases') or []):
+            self.add_alias(dst, alias)
         for key in COUNTERS:
             p[key] = int(p.get(key) or 0) + int(src_p.get(key) or 0)
         first = src_p.get('first_seen')
@@ -253,7 +435,7 @@ class Profiles:
         if last and last > (p.get('last_seen') or ''):
             p['last_seen'] = last
         _derive(p)
-        if src_p.get('leaks') or src_p.get('fold_to_3bet') is not None:
+        if has_manual(src_p):
             src_p['hands'] = 0
             src_p.update({k: 0 for k in COUNTERS})
             src_p['merged_into'] = dst

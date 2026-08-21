@@ -227,6 +227,205 @@ class ReadNicksTest(unittest.TestCase):
         read.assert_not_called()
 
 
+class NormTest(unittest.TestCase):
+    """Нормализация и нестрогое сравнение ников — живые промахи OCR."""
+
+    def test_case_spaces_and_junk_are_dropped(self):
+        for raw, key in (('INeedAHero', 'ineedahero'), ('Г еедАНего', 'гееданего'),
+                         ('EPT_38', 'ept38'), ('mr.big-1', 'mrbig1'),
+                         ('Poker Pro', 'pokerpro'), ('•Ace|', 'ace'), (None, '')):
+            with self.subTest(raw=raw):
+                self.assertEqual(opponents.norm_nick(raw), key)
+
+    def test_one_misread_letter_is_the_same_player(self):
+        """«INeedAHero» и «TNeedAHero»: I прочиталось как T — 0.9, один игрок."""
+        self.assertAlmostEqual(opponents.similar('INeedAHero', 'TNeedAHero'), 0.9)
+        self.assertGreaterEqual(opponents.similar('МеедАНего', 'Г еедАНего'),
+                                opponents.NICK_RATIO)
+
+    def test_different_nicks_are_not_glued(self):
+        self.assertLess(opponents.similar('INeedAHero', 'HerGlinoMes'),
+                        opponents.NICK_RATIO)
+        self.assertLess(opponents.similar('PokerPro88', 'RiverRat77'),
+                        opponents.NICK_RATIO)
+
+    def test_short_nicks_need_an_exact_key(self):
+        """У «Ace1» и «Ace2» похожесть 0.75 — а это разные люди."""
+        self.assertEqual(opponents.similar('Ace1', 'Ace2'), 0.0)
+        self.assertEqual(opponents.similar('Ace 1', 'ace1'), 1.0)
+
+    def test_normalised_key_is_an_exact_match(self):
+        self.assertEqual(opponents.similar('Poker Pro', 'pokerpro'), 1.0)
+
+    def test_seat_name_is_not_a_nick(self):
+        self.assertTrue(opponents.is_seat_name('Оппонент 3'))
+        self.assertFalse(opponents.is_seat_name('Оппонентик'))
+        self.assertFalse(opponents.is_seat_name('PokerPro88'))
+
+    def test_ratio_in_the_log_has_no_zero_tail(self):
+        self.assertEqual(opponents.ratio_str(0.9), '0.9')
+        self.assertEqual(opponents.ratio_str(0.833), '0.83')
+        self.assertEqual(opponents.ratio_str(1.0), '1')
+
+
+class SamePlayerTest(unittest.TestCase):
+    """Profiles: новое написание знакомого ника не заводит второго профиля."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix='clubgg_same_')
+        self.p = opponents.Profiles(path=os.path.join(tmp, 'players.json'), db={})
+
+    def hero(self, hands=51, name='INeedAHero'):
+        for _ in range(hands):
+            self.p.update(name, {'vpip': True}, notes=opponents.NICK_NOTE)
+        return self.p.db[name]
+
+    def test_profile_keeps_the_normalised_key(self):
+        self.assertEqual(self.hero(1)['nick_key'], 'ineedahero')
+        self.assertIn('INeedAHero', self.p.db, 'оригинал — имя записи')
+
+    def test_stats_go_to_the_similar_profile(self):
+        self.hero()
+        name, score = self.p.resolve('TNeedAHero')
+        self.assertEqual(name, 'INeedAHero')
+        self.assertAlmostEqual(score, 0.9)
+        self.p.update_all({1: {'vpip': True}}, nicks={1: 'TNeedAHero'})
+        self.assertNotIn('TNeedAHero', self.p.db)
+        self.assertEqual(self.p.db['INeedAHero']['hands'], 52)
+
+    def test_new_spelling_is_remembered_as_an_alias(self):
+        self.hero()
+        self.p.resolve('TNeedAHero')
+        self.assertEqual(self.p.db['INeedAHero']['aliases'], ['TNeedAHero'])
+        self.p.resolve('TNeedAHero')
+        self.assertEqual(self.p.db['INeedAHero']['aliases'], ['TNeedAHero'], 'без дублей')
+
+    def test_alias_matches_the_next_time(self):
+        """Вариант уже записан — сравнение идёт и с ним тоже."""
+        self.hero(3, name='МеедАНего')
+        self.p.add_alias('МеедАНего', 'INeedAHero')
+        self.assertEqual(self.p.resolve('TNeedAHero')[0], 'МеедАНего')
+
+    def test_a_different_nick_gets_its_own_profile(self):
+        self.hero()
+        self.assertEqual(self.p.resolve('HerGlinoMes'), ('HerGlinoMes', 0.0))
+        self.p.update_all({1: {'vpip': True}}, nicks={1: 'HerGlinoMes'})
+        self.assertEqual(sorted(self.p.db), ['HerGlinoMes', 'INeedAHero'])
+
+    def test_short_nick_needs_an_exact_match(self):
+        self.hero(4, name='Ace1')
+        self.assertEqual(self.p.resolve('Ace2'), ('Ace2', 0.0))
+        self.assertEqual(self.p.resolve('ace 1')[0], 'Ace1')
+
+    def test_seat_names_are_out_of_the_comparison(self):
+        """«Оппонент 1» — стул, а не ник: ни цель сравнения, ни его источник."""
+        self.p.update('Оппонент 1', {'vpip': True})
+        self.assertEqual(self.p.match('Оппонент 2'), (None, 0.0), 'место не с чем сравнивать')
+        self.assertEqual(self.p.resolve('Оппонент 2'), ('Оппонент 2', 0.0))
+        # ник, похожий на имя места (0.84), в статистику стула не уходит
+        self.assertGreater(opponents.similar('Оппонентус', 'Оппонент 1'),
+                           opponents.NICK_RATIO)
+        self.assertEqual(self.p.resolve('Оппонентус'), ('Оппонентус', 0.0))
+        self.assertNotIn('aliases', self.p.db['Оппонент 1'])
+
+    def test_merged_record_forwards_to_its_target(self):
+        self.hero()
+        self.p.db['TNeedAHero'] = dict(opponents.blank(), leaks=['лик'], hands=1)
+        self.p.merge('TNeedAHero', 'INeedAHero')
+        self.assertEqual(self.p.resolve('TNeedAHero')[0], 'INeedAHero')
+
+
+class DuplicateMergeTest(unittest.TestCase):
+    """Слияние дублей, накопившихся в players.json до нестрогого сравнения."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix='clubgg_dup_')
+        self.p = opponents.Profiles(path=os.path.join(tmp, 'players.json'), db={})
+
+    def rec(self, name, hands, **kw):
+        rec = opponents.blank(opponents.NICK_NOTE)
+        rec.update({'hands': hands, 'vpip_hands': hands, 'pfr_hands': 0,
+                    'three_bet_spots': hands, 'three_bet_hands': 0,
+                    'agg_bets': hands, 'agg_calls': hands,
+                    'first_seen': '2026-02-01', 'last_seen': '2026-02-01'})
+        rec.update(kw)
+        self.p.db[name] = rec
+        return rec
+
+    def test_counters_add_up_and_the_dupe_disappears(self):
+        self.rec('INeedAHero', 51)
+        self.rec('TNeedAHero', 1, first_seen='2026-01-01')
+        moves = self.p.merge_duplicates()
+        self.assertEqual([(s, d, n) for s, d, n, _ in moves],
+                         [('TNeedAHero', 'INeedAHero', 1)])
+        got = self.p.db['INeedAHero']
+        self.assertNotIn('TNeedAHero', self.p.db)
+        self.assertEqual(got['hands'], 52)
+        self.assertEqual(got['vpip_hands'], 52)
+        self.assertEqual(got['vpip'], 1.0, 'доли пересчитаны, а не сложены')
+        self.assertEqual(got['first_seen'], '2026-01-01', 'ранний first_seen')
+        self.assertEqual(got['aliases'], ['TNeedAHero'])
+
+    def test_a_smiley_over_a_letter_is_the_same_player(self):
+        self.rec('МеедАНего', 13)
+        self.rec('Г еедАНего', 1)
+        self.p.merge_duplicates()
+        self.assertEqual(sorted(self.p.db), ['МеедАНего'])
+        self.assertEqual(self.p.db['МеедАНего']['hands'], 14)
+
+    def test_different_players_are_left_alone(self):
+        self.rec('INeedAHero', 51)
+        self.rec('HerGlinoMes', 7)
+        self.rec('Оппонент 2', 3)
+        self.assertEqual(self.p.merge_duplicates(), [])
+        self.assertEqual(sorted(self.p.db),
+                         ['HerGlinoMes', 'INeedAHero', 'Оппонент 2'])
+
+    def test_hand_written_notes_survive_the_merge(self):
+        self.rec('INeedAHero', 51)
+        self.rec('TNeedAHero', 1, leaks=['коллит всё подряд'], fold_to_3bet=0.4)
+        self.p.merge_duplicates()
+        old = self.p.db['TNeedAHero']
+        self.assertEqual(old['merged_into'], 'INeedAHero')
+        self.assertEqual(old['leaks'], ['коллит всё подряд'])
+        self.assertEqual(old['hands'], 0, 'руки не должны посчитаться дважды')
+        self.assertEqual(self.p.db['INeedAHero']['hands'], 52)
+
+    def test_three_spellings_collapse_into_one(self):
+        self.rec('INeedAHero', 51)
+        self.rec('TNeedAHero', 1)
+        self.rec('lNeedAHero', 2)
+        self.p.merge_duplicates()
+        self.assertEqual(sorted(self.p.db), ['INeedAHero'])
+        self.assertEqual(self.p.db['INeedAHero']['hands'], 54)
+        self.assertEqual(sorted(self.p.db['INeedAHero']['aliases']),
+                         ['TNeedAHero', 'lNeedAHero'])
+
+    def test_hero_and_junk_keys_are_untouched(self):
+        self.p.db['_comment'] = 'это не профиль'
+        self.p.db[config.HERO_NAME] = opponents.blank('Это я (герой)')
+        self.rec(config.HERO_NAME + '1', 4)       # похоже на героя, но это не он
+        self.assertEqual(self.p.merge_duplicates(), [])
+        self.assertIn('_comment', self.p.db)
+        self.assertEqual(self.p.db[config.HERO_NAME]['hands'], 0)
+
+    def test_bot_merges_on_start_and_logs_it(self):
+        tmp = tempfile.mkdtemp(prefix='clubgg_dup_bot_')
+        path = os.path.join(tmp, 'players.json')
+        bot = Bot(mock.Mock(), dry_run=True, players_db={},
+                  players_path=path, log_path=os.path.join(tmp, 'bot.log'),
+                  history_path=os.path.join(tmp, 'h.jsonl'))
+        self.p = bot.profiles
+        self.rec('INeedAHero', 51)
+        self.rec('TNeedAHero', 1)
+        lines = []
+        bot.log = lines.append
+        bot.log_memory()
+        self.assertIn('слиты дубли: "TNeedAHero" -> "INeedAHero" (1 рука)', lines)
+        self.assertEqual(bot.players_db['INeedAHero']['hands'], 52)
+        self.assertTrue(os.path.exists(path), 'слитая база записана на диск')
+
+
 class MergeTest(unittest.TestCase):
     """Слияние: накопленное на «Оппоненте N» достаётся человеку, а не стулу."""
 
@@ -372,6 +571,59 @@ class BotNickTest(unittest.TestCase):
         with self.read({}):
             self.assertEqual(self.bot.update_nicks(self.img, self.state(seated=0)), {})
             self.assertEqual(self.bot.update_nicks(self.img, self.state(seated=1)), {})
+
+    def test_new_spelling_of_a_known_nick_goes_to_the_same_profile(self):
+        """OCR перепутал букву — профиль тот же, в логе видно почему."""
+        for _ in range(51):
+            self.bot.profiles.update('INeedAHero', {'vpip': True})
+        with self.read({1: 'TNeedAHero'}):
+            nicks = self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertEqual(nicks, {1: 'INeedAHero'})
+        self.assertIn('ник "tneedahero" похож на "INeedAHero" (0.9) — статистика туда',
+                      self.lines)
+        self.assertNotIn('TNeedAHero', self.bot.players_db)
+        self.assertEqual(self.bot.players_db['INeedAHero']['aliases'], ['TNeedAHero'])
+
+    def test_seat_stats_move_even_when_the_nick_is_a_new_spelling(self):
+        """Накопленное «Оппонентом 1» уходит человеку, а не второму написанию."""
+        self.bot.profiles.update('Оппонент 1', {'vpip': True})
+        for _ in range(51):
+            self.bot.profiles.update('INeedAHero', {'vpip': True})
+        with self.read({1: 'TNeedAHero'}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertNotIn('Оппонент 1', self.bot.players_db)
+        self.assertEqual(self.bot.players_db['INeedAHero']['hands'], 52)
+        self.assertTrue(any('статистика перенесена: 1 рука' in s for s in self.lines))
+
+    def test_seat_cache_holds_a_nick_read_in_another_alphabet(self):
+        """«INeedAHero» и «МеедАНего» — одна плашка: по буквам не похожи совсем."""
+        with self.read({1: 'INeedAHero'}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        self.bot.save_profiles({1: {'vpip': True}})
+        self.assertLess(opponents.similar('INeedAHero', 'МеедАНего'),
+                        opponents.NICK_RATIO)
+        with self.read({1: 'МеедАНего'}):
+            nicks = self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertEqual(nicks, {1: 'INeedAHero'}, 'место не пустело — игрок тот же')
+        self.assertIn('место 1: ник "МеедАНего" → тот же игрок (кэш места), '
+                      'статистика в "INeedAHero" (алиас добавлен)', self.lines)
+        self.bot.save_profiles({1: {'vpip': True}})
+        self.assertEqual(sorted(self.bot.players_db), ['INeedAHero'])
+        self.assertEqual(self.bot.players_db['INeedAHero']['hands'], 2)
+        self.assertEqual(self.bot.players_db['INeedAHero']['aliases'], ['МеедАНего'])
+
+    def test_empty_seat_drops_the_cache_and_a_new_player_gets_a_profile(self):
+        """Место опустело — там сядет другой человек, ник ему не наследуется."""
+        with self.read({1: 'INeedAHero'}):
+            self.bot.update_nicks(self.img, self.state(seated=1))
+        self.bot.save_profiles({1: {'vpip': True}})
+        with self.read({}):
+            self.bot.update_nicks(self.img, self.state(seated=0))
+        with self.read({1: 'HerGlinoMes'}):
+            nicks = self.bot.update_nicks(self.img, self.state(seated=1))
+        self.assertEqual(nicks, {1: 'HerGlinoMes'})
+        self.bot.save_profiles({1: {'vpip': True}})
+        self.assertEqual(sorted(self.bot.players_db), ['HerGlinoMes', 'INeedAHero'])
 
     def test_reader_failure_does_not_break_the_hand(self):
         with mock.patch.object(nr, 'read_nicks', side_effect=RuntimeError('boom')):
