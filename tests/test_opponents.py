@@ -283,6 +283,92 @@ class StubScreen:
         pass
 
 
+class SoloOpponentTest(unittest.TestCase):
+    """Под кого именно подстраивается решение, когда профилей в базе несколько.
+
+    Подстройка применима только против одного оппонента (чьи цифры брать в
+    мультипоте — непонятно), но раньше «один» определялось по базе: ровно один
+    профиль в players.json. С приходом ников база копит всех, кого бот когда-либо
+    видел, и подстройка тихо умирала со второго знакомого игрока. Теперь
+    оппонента называют плашки кадра.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='clubgg_solo_')
+
+    def bot(self, db=None, nicks=None, **cfg):
+        b = Bot(StubScreen(), players_db=db if db is not None else {},
+                players_path=os.path.join(self.tmp, 'players.json'),
+                log_path=os.path.join(self.tmp, 'bot.log'),
+                history_path=os.path.join(self.tmp, 'h.jsonl'), cfg=cfg)
+        b.nicks = dict(nicks or {})
+        return b
+
+    @staticmethod
+    def prof(hands=30, vpip=0.55):
+        return dict(opponents.blank(opponents.NICK_NOTE), hands=hands, vpip=vpip, agg=0.5)
+
+    def db(self):
+        return {'Вася': self.prof(vpip=0.55), 'Петя': self.prof(vpip=0.15)}
+
+    def test_the_nick_of_the_live_seat_picks_the_profile(self):
+        """Двое в базе, за столом один — берём цифры того, кто в раздаче."""
+        bot = self.bot(db=self.db(), nicks={1: 'Вася', 2: 'Петя'})
+        self.assertEqual(bot.solo_opponent(state(seated=2, live=1)), 'Вася')
+        self.assertEqual(bot.opponent_profile(state(seated=2, live=1)),
+                         bot.players_db['Вася'])
+
+    def test_the_second_seat_is_counted_the_way_the_observer_counts(self):
+        """Место по кругу — порядок плашек без героя, как в HandObserver."""
+        bot = self.bot(db=self.db(), nicks={1: 'Вася', 2: 'Петя'})
+        s = state(seated=2, live=2)
+        s['seats'][1]['in_hand'] = False          # первый оппонент сбросил
+        self.assertEqual(bot.solo_opponent(s), 'Петя')
+        self.assertEqual(bot.opponent_profile(s)['vpip'], 0.15)
+
+    def test_a_multiway_pot_has_no_profile(self):
+        bot = self.bot(db=self.db(), nicks={1: 'Вася', 2: 'Петя'})
+        self.assertIsNone(bot.solo_opponent(state(seated=2, live=2)))
+        self.assertIsNone(bot.opponent_profile(state(seated=2, live=2)))
+
+    def test_nobody_in_the_hand_has_no_profile(self):
+        bot = self.bot(db=self.db(), nicks={1: 'Вася'})
+        self.assertIsNone(bot.solo_opponent(state(seated=2, live=0)))
+
+    def test_a_seat_without_a_nick_falls_back_to_its_number(self):
+        """Ники не прочитались — статистика писалась по местам, по ним и берём."""
+        bot = self.bot(db={'Оппонент 1': self.prof()})
+        self.assertEqual(bot.solo_opponent(state(seated=2, live=1)), 'Оппонент 1')
+        self.assertEqual(bot.opponent_profile(state(seated=2, live=1))['hands'], 30)
+
+    def test_an_unknown_opponent_has_no_profile_yet(self):
+        """За столом новый человек — цифры соседа к нему не применяются."""
+        bot = self.bot(db=self.db(), nicks={1: 'Коля'})
+        self.assertIsNone(bot.opponent_profile(state(seated=2, live=1)))
+
+    def test_a_merged_nick_leads_to_the_surviving_profile(self):
+        """Ник склеен с дублем — решение правится по тому профилю, куда всё свели."""
+        db = {'Вася': self.prof(hands=40), 'Bacя': {'merged_into': 'Вася'}}
+        bot = self.bot(db=db, nicks={1: 'Bacя'})
+        self.assertEqual(bot.opponent_profile(state(seated=2, live=1))['hands'], 40)
+
+    def test_a_multiway_frame_by_the_player_count_has_no_profile(self):
+        """Плашек в состоянии нет, но игроков больше двух — подстройки нет."""
+        bot = self.bot(db={'Вася': self.prof()})
+        self.assertIsNone(bot.opponent_profile({'players': 6}))
+        self.assertEqual(bot.opponent_profile({'players': 2}), bot.players_db['Вася'])
+
+    def test_without_seats_the_only_profile_is_still_used(self):
+        """Разбор кадра без плашек — прежнее правило: единственный профиль в базе."""
+        bot = self.bot(db={'Вася': self.prof()})
+        self.assertEqual(bot.opponent_profile(), bot.players_db['Вася'])
+        self.assertIsNone(self.bot(db=self.db()).opponent_profile())
+
+    def test_the_flag_still_switches_everything_off(self):
+        bot = self.bot(db=self.db(), nicks={1: 'Вася'}, opponent_memory=False)
+        self.assertIsNone(bot.opponent_profile(state(seated=2, live=1)))
+
+
 class BotMemoryTest(unittest.TestCase):
     """Игровой цикл: бот сам пишет профили и сам под них подстраивается."""
 

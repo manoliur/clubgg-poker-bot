@@ -276,15 +276,46 @@ class Bot:
         except OSError as e:
             self.log(f'не записал историю: {e}')
 
-    def opponent_profile(self):
-        """Профиль оппонента из players.json (кроме героя), если он один.
+    def solo_opponent(self, state):
+        """Имя профиля ЕДИНСТВЕННОГО оппонента в раздаче (или None).
 
-        Статистика копится по ВСЕМ местам за столом, а вот подстраиваться под
+        Место по кругу считается ровно так же, как в HandObserver: плашки без
+        героя по порядку, начиная с 1. Ник этого места (self.nicks) и есть имя
+        профиля; ников нет — падаем на «Оппонент N», как статистика и писалась.
+        """
+        seats = (state or {}).get('seats') or []
+        live, i = [], 0
+        for s in seats:
+            if s.get('hero'):
+                continue
+            i += 1
+            if s.get('in_hand'):
+                live.append(i)
+        if len(live) != 1:
+            return None
+        return self.nicks.get(live[0]) or opponents.seat_name(live[0])
+
+    def opponent_profile(self, state=None):
+        """Профиль оппонента, ПРОТИВ КОТОРОГО идёт раздача, — по нему правится решение.
+
+        Статистика копится по всем местам за столом, а вот подстраиваться под
         неё можно только когда оппонент один: иначе непонятно, чьи цифры
-        применять к решению.
+        применять. Кто это — говорят плашки кадра (solo_opponent).
+
+        Когда плашек в состоянии нет (разбор кадра без мест, тесты), работает
+        прежнее правило: единственный профиль в базе. Раньше оно было
+        единственным, и с приходом ников подстройка тихо умирала — стоило базе
+        накопить второго игрока, и профиль не применялся уже никогда.
         """
         if not self.opponent_memory:
             return None
+        players = (state or {}).get('players')
+        if players is not None and players > 2:
+            return None                 # мультипот: чьи цифры — непонятно
+        name = self.solo_opponent(state)
+        if name:
+            p = self.players_db.get(self.profiles.canonical(name))
+            return p if isinstance(p, dict) and not p.get('merged_into') else None
         others = [v for k, v in self.players_db.items()
                   if isinstance(v, dict) and k != config.HERO_NAME
                   and not v.get('merged_into')]
@@ -661,7 +692,7 @@ class Bot:
         self.refresh_settings()
         if strategy.blocker_bluff_spot(state, self.chart, self.stack_bb):
             state = {**state, 'bluff_ok': self.bluff_ok(state)}
-        return strategy.decide(state, profile=self.opponent_profile(),
+        return strategy.decide(state, profile=self.opponent_profile(state),
                                stack_bb=self.stack_bb, chart=self.chart)
 
     def wants_expand(self, state, pot_frac=None):
