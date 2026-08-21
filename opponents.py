@@ -258,19 +258,28 @@ class Profiles:
             name, depth = nxt, depth - 1
         return name
 
-    def match(self, nick, ratio=NICK_RATIO):
+    def match(self, nick, ratio=NICK_RATIO, exclude=()):
         """Профиль того же игрока под другим написанием: (имя, похожесть).
 
         Сравнивается нормализованный ник — и с именем профиля, и со всеми уже
         записанными вариантами (aliases). Не нашли похожего — (None, 0.0).
+
+        exclude — профили, которыми уже занят СОСЕДНИЙ стул в этой же раздаче.
+        Их пропускаем: за одним столом один человек дважды не сидит, а ники
+        соседей бывают похожи сами по себе («PokerKing1» и «PokerKing2» похожи
+        на 0.9), и без этого статистика двоих сваливалась в один профиль, да
+        ещё и с двойным счётом рук за одну раздачу.
         """
         nick = (nick or '').strip()
         if not nick or is_seat_name(nick):
             return None, 0.0
-        if isinstance(self.db.get(nick), dict):
+        taken = {self.canonical(n) for n in exclude}
+        if isinstance(self.db.get(nick), dict) and self.canonical(nick) not in taken:
             return nick, 1.0
         best, score = None, 0.0
         for name, p in self.nicks():
+            if self.canonical(name) in taken:
+                continue
             near = similar(nick, name)
             for alias in p.get('aliases') or []:
                 near = max(near, similar(nick, alias))
@@ -293,15 +302,17 @@ class Profiles:
         aliases.append(nick)
         return True
 
-    def resolve(self, nick):
+    def resolve(self, nick, exclude=()):
         """Ник с экрана -> (имя профиля, похожесть), куда писать статистику.
 
         Ник уже знаком или похож на знакомый — возвращается ИМЯ ТОГО профиля, а
         новое написание уходит в его aliases: OCR путает буквы, а игрок за столом
         один. Похожего нет — (сам ник, 0.0), это новый человек.
+
+        exclude — профили соседей по столу в этой раздаче, см. match.
         """
         nick = (nick or '').strip()
-        name, score = self.match(nick)
+        name, score = self.match(nick, exclude=exclude)
         if not name:
             return nick, 0.0
         name = self.canonical(name)
@@ -365,13 +376,20 @@ class Profiles:
         место хоть раз сыграло, его нулевые раздачи считаются как раньше — иначе
         у молчаливого фолдера VPIP уехал бы к 100%. Стёртые пустышки — в
         self.dropped.
+
+        Один профиль за раздачу обновляется ровно один раз: два места, ники
+        которых свелись к одному имени, — это соседи по столу, а не один игрок
+        (см. match), и второй из них пишется по месту.
         """
         nicks = nicks or {}
         names, self.dropped = [], []
         for seat, obs in sorted(observed.items()):
             nick = nicks.get(seat)
             if nick:
-                nick = self.resolve(nick)[0]     # другое написание знакомого ника
+                # другое написание знакомого ника, но не имя соседа по столу
+                nick = self.resolve(nick, exclude=names)[0]
+                if nick in names:
+                    nick = None          # два места прочитались одинаково
             name = player_name(seat, nick)
             known = self.profile(name)          # заодно дописывает счётчики
             if not nick and not showed_up(obs) and is_ghost(known):

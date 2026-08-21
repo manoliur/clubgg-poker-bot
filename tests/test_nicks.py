@@ -335,6 +335,52 @@ class SamePlayerTest(unittest.TestCase):
         self.assertEqual(self.p.resolve('TNeedAHero')[0], 'INeedAHero')
 
 
+class TableNeighboursTest(unittest.TestCase):
+    """Соседи по столу — разные люди, как бы ни были похожи их ники.
+
+    Нестрогое сравнение (0.8) склеивает «PokerKing1» и «PokerKing2» — похожесть
+    0.9. Пока это разные написания одного ника, склейка верна, но два места В
+    ОДНОЙ раздаче заняты двумя людьми: раньше их статистика сваливалась в один
+    профиль, и одна раздача считалась за две руки.
+    """
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix='clubgg_neigh_')
+        self.p = opponents.Profiles(path=os.path.join(tmp, 'players.json'), db={})
+
+    def hand(self, nicks):
+        observed = {seat: {'vpip': True, 'bets': 1} for seat in nicks}
+        return self.p.update_all(observed, nicks=nicks)
+
+    def test_similar_nicks_at_one_table_stay_apart(self):
+        names = self.hand({1: 'PokerKing1', 2: 'PokerKing2'})
+        self.assertEqual(names, ['PokerKing1', 'PokerKing2'])
+        for name in names:
+            self.assertEqual(self.p.db[name]['hands'], 1)
+            self.assertEqual(self.p.db[name].get('aliases'), [])
+
+    def test_a_neighbour_does_not_steal_a_known_profile(self):
+        for _ in range(10):
+            self.p.update('PokerKing1', {'vpip': True}, notes=opponents.NICK_NOTE)
+        names = self.hand({1: 'PokerKing1', 2: 'PokerKing2'})
+        self.assertEqual(names, ['PokerKing1', 'PokerKing2'])
+        self.assertEqual(self.p.db['PokerKing1']['hands'], 11)
+        self.assertEqual(self.p.db['PokerKing2']['hands'], 1)
+
+    def test_the_same_nick_on_two_seats_falls_back_to_the_seat(self):
+        """Обе плашки прочитались одинаково — второе место пишем по стулу."""
+        names = self.hand({1: 'PokerKing1', 2: 'PokerKing1'})
+        self.assertEqual(names, ['PokerKing1', 'Оппонент 2'])
+        self.assertEqual(self.p.db['PokerKing1']['hands'], 1)
+
+    def test_a_new_spelling_between_hands_still_merges(self):
+        """Через раздачу тот же ник, прочитанный иначе, по-прежнему один игрок."""
+        self.hand({1: 'INeedAHero'})
+        self.hand({1: 'TNeedAHero'})
+        self.assertNotIn('TNeedAHero', self.p.db)
+        self.assertEqual(self.p.db['INeedAHero']['hands'], 2)
+
+
 class DuplicateMergeTest(unittest.TestCase):
     """Слияние дублей, накопившихся в players.json до нестрогого сравнения."""
 

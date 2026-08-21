@@ -353,7 +353,11 @@ class Bot:
         nicks, merged = {}, False
         for seat in occupied:
             nick = fresh.get(seat) or self.nicks.get(seat)
-            name, note = self.same_player(seat, nick)
+            name, note = self.same_player(seat, nick, exclude=list(nicks.values()))
+            if name and name in nicks.values():
+                # два места свелись к одному имени: за столом это разные люди,
+                # и вести второго по месту честнее, чем свалить обоих в один профиль
+                name, note, nick = None, '', None
             if name:
                 nicks[seat] = name
             if self._nick_seen.get(seat) == (nick or ''):
@@ -377,7 +381,7 @@ class Bot:
         self.nicks = nicks
         return nicks
 
-    def same_player(self, seat, nick):
+    def same_player(self, seat, nick, exclude=()):
         """Ник с плашки -> (имя профиля, строка в лог о переклейке имени).
 
         Имя профиля — не всегда сам ник: OCR путает буквы, и «TNeedAHero» должен
@@ -388,12 +392,15 @@ class Bot:
           прочиталась плашка в этот раз (кириллица вместо латиницы — ники не
           похожи вовсе, а игрок один);
         * иначе — нестрогое сравнение с уже известными никами (Profiles.resolve).
+
+        exclude — имена, уже занятые другими местами в ЭТОЙ раздаче: сосед по
+        столу не может оказаться тем же человеком, как бы ни были похожи ники.
         """
         if not nick:
             return None, ''
-        name, score = self.profiles.resolve(nick)
+        name, score = self.profiles.resolve(nick, exclude=exclude)
         prev = self.nicks.get(seat)
-        if prev and prev != name:
+        if prev and prev != name and prev not in exclude:
             name = self.profiles.canonical(prev)
             added = self.profiles.add_alias(name, nick)
             return name, (f'место {seat}: ник "{nick}" → тот же игрок (кэш места), '
