@@ -17,7 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import strategy                    # noqa: E402  (свой модуль, сторонних библиотек нет)
+import config                      # noqa: E402  (свои модули, сторонних библиотек нет)
+import opponents                   # noqa: E402
+import strategy                    # noqa: E402
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DEVICES_FILE = os.path.join(BASE, 'devices.json')
@@ -44,8 +46,10 @@ FLAGS = [
 # Переключатели самого БОТА (в настройки стратегии не входят, живут только в
 # записи устройства). live_stack: бот читает свой стек с экрана раз в раздачу и
 # сам обновляет поле stack; выключено — играет по числу из панели, как раньше.
+# opponent_memory: копить статистику оппонентов и подстраиваться под неё.
 BOT_FLAGS = [
     ('live_stack', 'Живой стек — читать с экрана'),
+    ('opponent_memory', 'Память оппонентов — статистика'),
 ]
 BOT_FLAG_KEYS = [f[0] for f in BOT_FLAGS]
 
@@ -198,7 +202,13 @@ class BotManager:
                 'style': str(d.get('style') or strategy.DEFAULT_STYLE).lower(),
                 'flags': flags,
                 'sliders': {k: settings[k] for k in SLIDER_KEYS},
+                'opponents': self.opponents(),
                 'log': tail}
+
+    @staticmethod
+    def opponents():
+        """Профили из players.json — блок «Оппоненты». Файл пишет бот."""
+        return opponents.Profiles(config.PLAYERS_FILE).opponents()
 
     @staticmethod
     def styles():
@@ -233,6 +243,8 @@ class BotManager:
         cmd += ['--style', str(d.get('style') or strategy.DEFAULT_STYLE)]
         if not d.get('live_stack', True):
             cmd += ['--no-live-stack']
+        if not d.get('opponent_memory', True):
+            cmd += ['--no-memory']
         if d.get('name'):
             cmd += ['--name', d['name']]
         f = open(log_path, 'a', encoding='utf-8')
@@ -344,6 +356,12 @@ PAGE = """<!DOCTYPE html>
  .cell{display:flex;gap:8px;align-items:center}
  .cell label{flex:1 0 150px}
  .val{font-size:12px;color:#ffd75e;min-width:34px;text-align:right}
+ .opps{margin:10px 0 4px}
+ .opps b{font-size:13px;color:#ffd75e}
+ .opps table{border-collapse:collapse;font-size:12px;margin-top:4px}
+ .opps th,.opps td{border:1px solid #2c3644;padding:2px 9px;text-align:right}
+ .opps th{color:#9fb0c3;font-weight:normal}
+ .opps th:first-child,.opps td:first-child{text-align:left}
  .flags label{color:#e8e8e8;display:flex;gap:6px;align-items:center;cursor:pointer}
  .dirty{color:#ffd75e}
 </style></head><body><div class="wrap">
@@ -360,6 +378,7 @@ async function api(path, method, body){
   return r.json();
 }
 function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function pct(x){ return Math.round((x||0)*100)+'%'; }
 async function refresh(){
   if (editing) return;       // иначе автообновление сотрёт несохранённые правки
   const data = await api('/api/devices');
@@ -389,6 +408,12 @@ async function refresh(){
      `<div class="cell"><label>${title}</label>
        <input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${step}" value="${d.sliders[k]}">
        <span class="val">${d.sliders[k]}</span></div>`).join('')}</div>
+   <div class="opps"><b>Оппоненты</b>${(d.opponents||[]).length ? `<table>
+     <tr><th>Имя</th><th>Рук</th><th>VPIP</th><th>PFR</th><th>3-бет</th><th>Agg</th></tr>
+     ${d.opponents.map(o => `<tr><td>${esc(o.name)}</td><td>${o.hands}</td>
+       <td>${pct(o.vpip)}</td><td>${pct(o.pfr)}</td><td>${pct(o.three_bet)}</td>
+       <td>${(o.agg||0).toFixed(1)}</td></tr>`).join('')}</table>`
+     : ' <span class="hint">пока пусто — профили появятся после первых раздач</span>'}</div>
    <div class="row">
      <button class="go" data-a="start" ${d.running?'disabled':''}>▶ Старт</button>
      <button class="stop" data-a="stop" ${d.running?'':'disabled'}>■ Стоп</button>

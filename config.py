@@ -16,6 +16,13 @@ SHOTS_LIVE = os.path.join(os.path.dirname(BASE), 'shots_live')   # кадры ж
 HAND_HISTORY = os.path.join(BASE, 'hand_history.jsonl')
 LOG_FILE = os.path.join(BASE, 'bot.log')
 DEVICES_FILE = os.path.join(BASE, 'devices.json')   # его пишет панель, бот перечитывает
+PLAYERS_FILE = os.path.join(BASE, 'players.json')   # профили оппонентов (память бота)
+
+# --- поведение самого бота ---
+# Переключатели, которые живут в записи устройства (в настройки стратегии не
+# входят): панель пишет их в devices.json, бот перечитывает перед решением.
+# Оба по умолчанию включены.
+BOT_FLAGS = ('live_stack', 'opponent_memory')
 
 ADB = os.environ.get('CLUBGG_ADB', r'E:/down/platform-tools/platform-tools/adb.exe')
 SERIAL = os.environ.get('CLUBGG_SERIAL', '1cf5db29')

@@ -228,6 +228,48 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('--no-live-stack', popen.call_args[0][0])
 
+    def test_memory_flag_is_on_by_default(self):
+        serial = self.mgr.devices[0]['serial']
+        with mock.patch.object(self.mgr, 'adb_online', return_value=[]):
+            flags = self.mgr.status(serial)['flags']
+        self.assertTrue(flags['opponent_memory'])
+
+    def test_memory_flag_is_saved(self):
+        serial = self.mgr.devices[0]['serial']
+        self.mgr.save_config(serial, {'opponent_memory': False})
+        with open(self.path, encoding='utf-8') as f:
+            self.assertIs(json.load(f)[0]['opponent_memory'], False)
+
+    def test_start_turns_the_memory_off(self):
+        serial = self.mgr.devices[0]['serial']
+        self.mgr.save_config(serial, {'opponent_memory': False})
+        with mock.patch.object(self.panel.subprocess, 'Popen') as popen, \
+             mock.patch.object(self.panel.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+            popen.return_value = mock.Mock(pid=4242)
+            with mock.patch.object(self.panel, 'LOGS_DIR', self.tmp):
+                self.mgr.start(serial)
+        self.assertIn('--no-memory', popen.call_args[0][0])
+
+    def test_opponents_block_reads_players_json(self):
+        import opponents
+        players = os.path.join(self.tmp, 'players.json')
+        db = opponents.Profiles(players)
+        db.update('Оппонент 1', {'vpip': True, 'pfr': True, 'bets': 2, 'passive': 1})
+        db.save()
+        serial = self.mgr.devices[0]['serial']
+        with mock.patch.object(self.panel.config, 'PLAYERS_FILE', players), \
+             mock.patch.object(self.mgr, 'adb_online', return_value=[]):
+            rows = self.mgr.status(serial)['opponents']
+        self.assertEqual(rows[0]['name'], 'Оппонент 1')
+        self.assertEqual(rows[0]['hands'], 1)
+        self.assertAlmostEqual(rows[0]['vpip'], 1.0)
+        self.assertAlmostEqual(rows[0]['agg'], 2.0)
+
+    def test_opponents_block_survives_a_missing_file(self):
+        with mock.patch.object(self.panel.config, 'PLAYERS_FILE',
+                               os.path.join(self.tmp, 'нет.json')):
+            self.assertEqual(self.mgr.opponents(), [])
+
     def test_styles_for_the_dropdown(self):
         styles = self.mgr.styles()
         self.assertEqual(set(styles), set(st.STYLE_PRESETS))

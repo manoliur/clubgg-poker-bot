@@ -38,7 +38,24 @@ class FakeScreen:
         self.taps.append((int(x), int(y)))
 
 
-class MainLoopTest(unittest.TestCase):
+class IsolatedBotTest(unittest.TestCase):
+    """Общая изоляция: без настоящих пауз перед тапом и без боевого players.json."""
+
+    tmp = None
+
+    def setUp(self):
+        # Человечные тайминги включены по умолчанию (их проверяет test_timing.py),
+        # а здесь настоящая пауза перед каждым тапом только замедляла бы тесты.
+        sleep = mock.patch.object(main_mod.time, 'sleep')
+        sleep.start()
+        self.addCleanup(sleep.stop)
+        players = mock.patch.object(config, 'PLAYERS_FILE',
+                                    os.path.join(self.tmp, 'players.json'))
+        players.start()
+        self.addCleanup(players.stop)
+
+
+class MainLoopTest(IsolatedBotTest):
     tmp = tpl = None
 
     @classmethod
@@ -645,7 +662,7 @@ class MainLoopTest(unittest.TestCase):
             shutil.rmtree(empty, ignore_errors=True)
 
 
-class SoakTest(unittest.TestCase):
+class SoakTest(IsolatedBotTest):
     """Сквозная проверка на случайных столах: карты, игроки, законность действия, тап."""
 
     @classmethod

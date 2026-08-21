@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Память оппонентов: наблюдения за раздачей -> профили в players.json.
+
+Бот не видит ни чужих карт, ни чужих кнопок — только то, что рисует клиент:
+кто сидит за столом, у кого остались карты, есть ли перед нами ставка и сколько
+стоит колл. Поэтому статистика собирается ЧЕСТНО по наблюдаемому и заведомо
+грубая:
+
+* VPIP — оппонент остался в раздаче после префлопа (карты видны на флопе и
+  дальше) либо сам поставил: значит, деньги он вложил добровольно;
+* PFR — до нашего первого хода на префлопе колл стоит дороже большого блайнда,
+  то есть кто-то поднял;
+* three_bet — мы подняли на префлопе, и ход вернулся к нам со ставкой: это
+  ререйз. Считается долей от «спотов» — раздач, где мы вообще открывали рейзом;
+* agg — постфлоп: ставка/рейз оппонента против его же чеков и коллов (AF).
+
+Кто именно сыграл, видно только когда в раздаче ОДИН оппонент: имён и чужих
+кнопок в кадре нет. При нескольких оппонентах копится лишь VPIP (он читается по
+их картам на столе), а ставки не приписываются никому.
+
+Оппонент опознаётся местом по кругу от героя («Оппонент 1» — следующий по
+часовой стрелке): читать ники бот не умеет. Если игрок встал из-за стола, места
+за ним сдвигаются — статистика такого места смешается. Это цена того, что имён
+у нас нет; для кэша с постоянным составом стола оценка рабочая.
+"""
+import datetime
+import json
+import os
+
+import config
+
+PLAYERS_FILE = os.path.join(config.BASE, 'players.json')
+
+# Порядок улиц: по нему считается «оппонент доехал до следующей улицы» (колл).
+STREETS = ('preflop', 'flop', 'turn', 'river')
+
+# Колл дороже этого (в ББ) на префлопе = перед нами не блайнд, а рейз.
+PFR_MIN_CALL = 1.05
+
+# Пустой профиль: поля те же, что были в players.json, плюс счётчики, из которых
+# доли пересчитываются заново (без накопления ошибки округления).
+COUNTERS = ('vpip_hands', 'pfr_hands', 'three_bet_hands', 'three_bet_spots',
+            'agg_bets', 'agg_calls')
+
+
+SEAT_NOTE = 'место по кругу от героя (ников бот не читает)'
+
+
+def seat_name(i):
+    """Имя оппонента по месту: i — номер по часовой стрелке от героя (1..5)."""
+    return f'Оппонент {i}'
+
+
+def blank(notes=''):
+    p = {'first_seen': datetime.date.today().isoformat(), 'hands': 0,
+         'vpip': 0.0, 'pfr': 0.0, 'three_bet': 0.0, 'agg': 0.0,
+         'fold_to_3bet': None, 'leaks': [], 'notes': notes}
+    p.update({k: 0 for k in COUNTERS})
+    return p
+
+
+def _seed(p):
+    """Дописать счётчики в запись, сделанную старой версией (доли -> руки)."""
+    hands = int(p.get('hands') or 0)
+    for key, share in (('vpip_hands', 'vpip'), ('pfr_hands', 'pfr')):
+        if key not in p:
+            p[key] = int(round((p.get(share) or 0) * hands))
+    if 'three_bet_spots' not in p:
+        p['three_bet_spots'] = hands
+    if 'three_bet_hands' not in p:
+        p['three_bet_hands'] = int(round((p.get('three_bet') or 0) * hands))
+    for key in ('agg_bets', 'agg_calls'):
+        p.setdefault(key, 0)
+    return p
+
+
+def _derive(p):
+    """Пересчитать доли из счётчиков (то, что читают strategy и панель)."""
+    hands = max(1, int(p.get('hands') or 0))
+    p['vpip'] = round(p['vpip_hands'] / hands, 3)
+    p['pfr'] = round(p['pfr_hands'] / hands, 3)
+    spots = int(p.get('three_bet_spots') or 0)
+    p['three_bet'] = round(p['three_bet_hands'] / spots, 3) if spots else 0.0
+    p['agg'] = round(p['agg_bets'] / max(1, int(p.get('agg_calls') or 0)), 2)
+    return p
+
+
+def hands_word(n):
+    """1 рука, 2 руки, 5 рук — иначе лог читается по-машинному."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return 'рука'
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return 'руки'
+    return 'рук'
+
+
+def summary_line(name, p):
+    """«Оппонент 1 — 12 рук, VPIP 34%, PFR 18%, Agg 1.8» — строка для лога."""
+    hands = int(p.get('hands') or 0)
+    return (f'{name} — {hands} {hands_word(hands)}, '
+            f'VPIP {(p.get("vpip") or 0):.0%}, PFR {(p.get("pfr") or 0):.0%}, '
+            f'Agg {(p.get("agg") or 0):.1f}')
+
+
+class Profiles:
+    """players.json: чтение, накопление статистики, атомарная запись.
+
+    db — тот самый словарь, который держит бот (main.Bot.players_db): профили
+    правятся на месте, поэтому adjust_for_opponent сразу видит свежие цифры.
+    """
+
+    def __init__(self, path=None, db=None):
+        self.path = path or PLAYERS_FILE
+        self.db = db if db is not None else load(self.path)
+
+    def profile(self, name, create=False, notes=''):
+        p = self.db.get(name)
+        if not isinstance(p, dict):
+            if not create:
+                return None
+            p = self.db[name] = blank(notes)
+        return _seed(p)
+
+    def update(self, name, obs, notes=''):
+        """Учесть одну раздачу. obs — итог HandObserver для этого оппонента."""
+        p = self.profile(name, create=True, notes=notes)
+        p['hands'] = int(p.get('hands') or 0) + 1
+        p['vpip_hands'] += bool(obs.get('vpip'))
+        p['pfr_hands'] += bool(obs.get('pfr'))
+        p['three_bet_spots'] += bool(obs.get('three_bet_spot'))
+        p['three_bet_hands'] += bool(obs.get('three_bet'))
+        p['agg_bets'] += int(obs.get('bets') or 0)
+        p['agg_calls'] += int(obs.get('passive') or 0)
+        p['last_seen'] = datetime.date.today().isoformat()
+        return _derive(p)
+
+    def update_all(self, observed):
+        """Итог раздачи (место -> наблюдения) -> профили. Возвращает имена."""
+        names = []
+        for seat, obs in sorted(observed.items()):
+            self.update(seat_name(seat), obs, notes=SEAT_NOTE)
+            names.append(seat_name(seat))
+        return names
+
+    def opponents(self, hero=None):
+        """Профили всех, кроме героя — для панели и стартового лога."""
+        hero = hero or config.HERO_NAME
+        out = []
+        for name, p in self.db.items():
+            if name == hero or not isinstance(p, dict):
+                continue
+            out.append({'name': name, 'hands': int(p.get('hands') or 0),
+                        'vpip': p.get('vpip') or 0.0, 'pfr': p.get('pfr') or 0.0,
+                        'three_bet': p.get('three_bet') or 0.0,
+                        'agg': p.get('agg') or 0.0})
+        out.sort(key=lambda o: (-o['hands'], o['name']))
+        return out
+
+    def save(self):
+        """Записать файл целиком (через .tmp: панель не должна прочитать половину)."""
+        tmp = self.path + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(self.db, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+        except OSError:
+            return False
+        return True
+
+
+def load(path=None):
+    path = path or PLAYERS_FILE
+    try:
+        with open(path, encoding='utf-8') as f:
+            db = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return db if isinstance(db, dict) else {}
+
+
+class HandObserver:
+    """Наблюдения за ТЕКУЩЕЙ раздачей по кадрам стола.
+
+    observe() зовётся на каждом кадре (в том числе когда ход не наш — оппоненты
+    как раз тогда и играют) и возвращает итог ПРЕДЫДУЩЕЙ раздачи, когда видит
+    новые карманные карты. Пока своих карт мы не видели, наблюдать не за кем:
+    без плашки героя круг мест не привязан к нему.
+    """
+
+    def __init__(self, confirm=2):
+        # карманные карты читаются с ошибками (см. Bot._cards_ok), а лишняя
+        # «раздача» из-за такой ошибки портит счётчик рук: новую открываем
+        # только когда та же пара пришла confirm кадрами подряд
+        self.confirm = max(1, int(confirm))
+        self.hole = None
+        self.opp = {}
+        self.streets = {}
+        self.hero_raised = False
+        self.solo = None          # единственный оппонент в раздаче (или None)
+        self._pending = None
+        self._pending_seen = 0
+
+    # ---------- жизненный цикл раздачи ----------
+    def start(self, hole):
+        self.hole = list(hole)
+        self.opp = {}
+        self.streets = {}
+        self.hero_raised = False
+        self.solo = None
+        self._pending = None
+        self._pending_seen = 0
+
+    def finish(self):
+        """Закрыть раздачу: место -> наблюдения. None, если наблюдать было не за кем."""
+        seen = {i: r for i, r in self.opp.items() if r['seen']}
+        self.hole = None
+        self.opp = {}
+        self.streets = {}
+        self.hero_raised = False
+        self.solo = None
+        return seen or None
+
+    def _slot(self, i):
+        return self.opp.setdefault(i, {'seen': False, 'in_hand': False, 'vpip': False,
+                                       'pfr': False, 'three_bet': False,
+                                       'three_bet_spot': False, 'bets': 0, 'passive': 0})
+
+    def _street(self, street):
+        return self.streets.setdefault(street, {'bet': False, 'passive': False,
+                                                'hero_bet': False})
+
+    # ---------- наблюдение ----------
+    def observe(self, state):
+        finished = None
+        hole = [c for c in (state.get('hole') or []) if c]
+        if len(hole) == 2 and hole != self.hole:
+            self._pending_seen = self._pending_seen + 1 if hole == self._pending else 1
+            self._pending = hole
+            if self._pending_seen < self.confirm:
+                return None          # одна карта могла прочитаться неверно — ждём
+            if self.hole is not None:
+                finished = self.finish()
+            self.start(hole)
+        if self.hole is None:
+            return finished
+        live = self._see_seats(state)
+        self._see_street(state, live)
+        if state.get('my_turn'):
+            self._see_action(state, live)
+        return finished
+
+    def _see_seats(self, state):
+        """Отметить, кто сидит и у кого остались карты. Возвращает живые места."""
+        seats = state.get('seats') or []
+        if not any(s.get('hero') for s in seats):
+            return []            # круг мест не привязан к герою — считать нельзя
+        street = state.get('street') or 'preflop'
+        live, i = [], 0
+        for s in seats:
+            if s.get('hero'):
+                continue
+            i += 1
+            rec = self._slot(i)
+            rec['seen'] = True
+            if s.get('in_hand'):
+                rec['in_hand'] = True
+                live.append(i)
+                if street in ('flop', 'turn', 'river'):
+                    # доехал до флопа = вложил деньги на префлопе
+                    rec['vpip'] = True
+        self.solo = live[0] if len(live) == 1 else None
+        return live
+
+    def _see_street(self, state, live):
+        """Новая улица: если мы ставили на прошлой, а оппонент остался — он коллировал."""
+        street = state.get('street')
+        if street not in STREETS or street in self.streets:
+            return
+        seen = [s for s in STREETS[:STREETS.index(street)] if s in self.streets]
+        prev = self.streets[seen[-1]] if seen else None
+        if prev and prev['hero_bet'] and len(live) == 1:
+            self._slot(live[0])['passive'] += 1
+        self._street(street)
+
+    def _see_action(self, state, live):
+        """Кадр НАШЕГО хода: что успел сделать оппонент до нас.
+
+        Кнопки и сумма колла читаются только на своём ходу, поэтому вся
+        агрессия оппонента видна именно здесь. Приписываем её, лишь когда
+        оппонент в раздаче один: иначе непонятно, кто поставил.
+        """
+        if len(live) != 1:
+            return
+        who = self._slot(live[0])
+        street = state.get('street') or 'preflop'
+        has_bet = bool(state.get('has_bet'))
+        to_call = state.get('to_call_bb')
+        if street == 'preflop':
+            if not has_bet:
+                return
+            if self.hero_raised:
+                # мы подняли, а ход вернулся со ставкой — это ререйз
+                who['three_bet'] = who['vpip'] = True
+            elif to_call is not None and to_call > PFR_MIN_CALL:
+                who['pfr'] = who['vpip'] = True
+            return
+        st = self._street(street)
+        if has_bet:
+            if not st['bet']:
+                st['bet'] = True
+                who['bets'] += 1
+                who['vpip'] = True
+        elif not st['passive'] and state.get('first_to_act') == 'opp':
+            st['passive'] = True        # говорил первым и не поставил — чекнул нам
+            who['passive'] += 1
+
+    def note_action(self, action, street=None):
+        """Наш собственный ход — от него считаются 3-бет-споты и коллы оппонента."""
+        if self.hole is None:
+            return
+        street = street or 'preflop'
+        if street == 'preflop':
+            if action == 'raise':
+                if not self.hero_raised and self.solo is not None:
+                    self._slot(self.solo)['three_bet_spot'] = True
+                self.hero_raised = True
+            return
+        if street in STREETS:
+            self._street(street)['hero_bet'] = action == 'raise'
+
+
+def main(argv=None):
+    """CLI: показать накопленные профили (python opponents.py)."""
+    import sys
+    path = (argv or sys.argv[1:] or [PLAYERS_FILE])[0]
+    profiles = Profiles(path)
+    rows = profiles.opponents()
+    if not rows:
+        print(f'{path}: профилей оппонентов пока нет')
+        return 0
+    for row in rows:
+        print(summary_line(row['name'], row))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -1,42 +1,51 @@
 #!/usr/bin/env python3
-"""Добавить запись о раздаче в hand_history.jsonl и обновить players.json.
-Использование: python log_hand.py '{"hand_id":...,"street":"river",...}'
-или передать JSON через stdin."""
-import json, sys, os, datetime
+"""Ручная дозапись раздачи в hand_history.jsonl и профилей в players.json.
 
-DIR = r'C:\Users\Vlad\clubgg_bot'
-HISTORY = os.path.join(DIR, 'hand_history.jsonl')
-PLAYERS = os.path.join(DIR, 'players.json')
+В игровом цикле это делает сам бот (main.Bot.observe -> opponents.Profiles), без
+subprocess. Скрипт остался как отладочный вход — дописать раздачу руками:
 
-def log_hand(record):
+    python log_hand.py '{"hand_id":1,"street":"river","players_actions":{"Оппонент 1":["VPIP","PFR"]}}'
+    echo '{...}' | python log_hand.py
+
+players_actions: имя -> список пометок 'VPIP', 'PFR', '3BET', 'BET', 'CALL'.
+"""
+import datetime
+import json
+import sys
+
+import config
+import opponents
+
+HISTORY = config.HAND_HISTORY
+PLAYERS = config.PLAYERS_FILE
+
+
+def log_hand(record, path=None):
     record.setdefault('ts', datetime.datetime.now().isoformat(timespec='seconds'))
-    with open(HISTORY, 'a', encoding='utf-8') as f:
+    with open(path or HISTORY, 'a', encoding='utf-8') as f:
         f.write(json.dumps(record, ensure_ascii=False) + '\n')
     return len(record)
 
-def update_player(name, actions):
-    """actions: список строк вида 'VPIP', 'PFR', '3BET', 'FOLD', 'CALL', 'RAISE', 'CHECK'"""
-    with open(PLAYERS, encoding='utf-8') as f:
-        db = json.load(f)
-    p = db.setdefault(name, {'first_seen': datetime.date.today().isoformat(),
-                             'hands': 0, 'vpip': 0.0, 'pfr': 0.0, 'three_bet': 0.0,
-                             'agg': 0.0, 'fold_to_3bet': None, 'leaks': [], 'notes': ''})
-    p['hands'] += 1
-    vpip_hands = p['vpip'] * (p['hands'] - 1)
-    pfr_hands = p['pfr'] * (p['hands'] - 1)
-    if 'VPIP' in actions: vpip_hands += 1
-    if 'PFR' in actions: pfr_hands += 1
-    p['vpip'] = round(vpip_hands / p['hands'], 3)
-    p['pfr'] = round(pfr_hands / p['hands'], 3)
-    with open(PLAYERS, 'w', encoding='utf-8') as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+
+def update_player(name, actions, path=None):
+    """actions: пометки раздачи ('VPIP', 'PFR', '3BET', 'BET', 'CALL', 'CHECK')."""
+    actions = [str(a).upper() for a in actions]
+    profiles = opponents.Profiles(path or PLAYERS)
+    p = profiles.update(name, {
+        'vpip': 'VPIP' in actions or 'PFR' in actions or '3BET' in actions,
+        'pfr': 'PFR' in actions,
+        'three_bet': '3BET' in actions,
+        'three_bet_spot': '3BET' in actions,
+        'bets': actions.count('BET') + actions.count('RAISE'),
+        'passive': actions.count('CALL') + actions.count('CHECK'),
+    })
+    profiles.save()
     return p
+
 
 if __name__ == '__main__':
     data = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
     rec = json.loads(data)
     print('logged:', log_hand(rec))
-    if 'players_actions' in rec:
-        for name, actions in rec['players_actions'].items():
-            p = update_player(name, actions)
-            print(f'player {name}: {p}')
+    for player, marks in (rec.get('players_actions') or {}).items():
+        print(f'player {player}: {update_player(player, marks)}')

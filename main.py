@@ -25,9 +25,9 @@ import cv2
 import numpy as np
 
 import config
+import opponents
 import table_state as ts
 import strategy
-
 
 # --------------------------------------------------------------------------
 # источники кадров
@@ -85,7 +85,7 @@ class Bot:
 
     def __init__(self, screen, dry_run=False, stack_bb=69.6, players_db=None,
                  tpl_dir=None, log_path=None, history_path=None, chart=None,
-                 serial=None, devices_path=None, cfg=None):
+                 serial=None, devices_path=None, cfg=None, players_path=None):
         self.screen = screen
         self.dry_run = dry_run
         self.stack_bb = stack_bb
@@ -94,7 +94,13 @@ class Bot:
         self.start_stack_bb = stack_bb
         self.live_stack = True          # читать свой стек с экрана (флаг live_stack)
         self.stack_auto = False         # текущее значение прочитано ботом, а не панелью
-        self.players_db = players_db or {}
+        self.players_db = players_db if players_db is not None else {}
+        # профили правятся прямо в players_db, поэтому opponent_profile() видит
+        # свежие цифры сразу после записи раздачи
+        self.profiles = opponents.Profiles(players_path or config.PLAYERS_FILE,
+                                           db=self.players_db)
+        self.observer = opponents.HandObserver()
+        self.opponent_memory = True     # флаг opponent_memory (панель)
         # копия: настройки меняются на лету (панель), чарт по умолчанию — общий на процесс
         self.chart = (chart or strategy.active_chart()).copy()
         # база, поверх которой каждый раз собираются стиль и ползунки: применять
@@ -191,10 +197,56 @@ class Bot:
             self.log(f'не записал историю: {e}')
 
     def opponent_profile(self):
-        """Профиль оппонента из players.json (кроме героя), если он один."""
+        """Профиль оппонента из players.json (кроме героя), если он один.
+
+        Статистика копится по ВСЕМ местам за столом, а вот подстраиваться под
+        неё можно только когда оппонент один: иначе непонятно, чьи цифры
+        применять к решению.
+        """
+        if not self.opponent_memory:
+            return None
         others = [v for k, v in self.players_db.items()
                   if isinstance(v, dict) and k != config.HERO_NAME]
         return others[0] if len(others) == 1 else None
+
+    # ---------- память оппонентов ----------
+    def observe(self, state):
+        """Учесть кадр в наблюдениях за оппонентами; на границе раздачи — записать.
+
+        Зовётся на КАЖДОМ кадре, в том числе когда ход не наш: оппоненты как раз
+        тогда и играют. Наблюдение не должно ронять игровой цикл — любая ошибка
+        разбора кадра только пишется в лог.
+        """
+        if not self.opponent_memory:
+            return None
+        try:
+            finished = self.observer.observe(state)
+            return self.save_profiles(finished) if finished else None
+        except Exception as e:                    # цикл важнее статистики
+            self.log(f'память оппонентов: кадр не учтён ({type(e).__name__}: {e})')
+            return None
+
+    def save_profiles(self, observed):
+        """Итог раздачи -> players.json. Возвращает имена обновлённых профилей."""
+        names = self.profiles.update_all(observed)
+        if not self.profiles.save():
+            self.log('память оппонентов: players.json не записан')
+        for name in names:
+            self.log('память оппонентов: '
+                     + opponents.summary_line(name, self.players_db[name]))
+        return names
+
+    def log_memory(self):
+        """Что бот помнит об оппонентах — строкой на старте сессии."""
+        if not self.opponent_memory:
+            self.log('память оппонентов: выключена (флаг opponent_memory)')
+            return []
+        rows = self.profiles.opponents()
+        if not rows:
+            self.log('память оппонентов: профилей пока нет — копим с первой раздачи')
+        for row in rows:
+            self.log('память оппонентов: ' + opponents.summary_line(row['name'], row))
+        return rows
 
     def bet_point(self, state, pot_frac=None):
         """Куда тапать ставку/рейз: центр ЖИВОГО пресета правого столбца. None — некуда.
@@ -244,6 +296,7 @@ class Bot:
         changed = [k for k, v in settings.items() if self.chart.settings.get(k) != v]
         self.chart.settings = settings
         self.live_stack = bool(cfg.get('live_stack', True))
+        self.opponent_memory = bool(cfg.get('opponent_memory', True))
         stack = cfg.get('stack')
         if stack:
             try:
@@ -476,6 +529,7 @@ class Bot:
                 return None
             state = ts.read_state(img, tpl_dir=self.tpl_dir)
         self.last_state = state
+        self.observe(state)          # кадр в память оппонентов (в run — на каждом)
         if not state['my_turn']:
             self.stable = 0
             return None
@@ -551,6 +605,7 @@ class Bot:
             self._save_frame(img, action)
         if not self.dry_run and point:
             self.screen.tap(*point)
+        self.observer.note_action(action, state['street'])
         self.record(entry)
         self.actions += 1
         self.stats[action] = self.stats.get(action, 0) + 1
@@ -558,8 +613,16 @@ class Bot:
         self.last_action_ts = time.time()
         return entry
 
+    def flush_memory(self):
+        """Дописать профили по незакрытой раздаче (бота останавливают посреди игры)."""
+        if not self.opponent_memory:
+            return None
+        finished = self.observer.finish()
+        return self.save_profiles(finished) if finished else None
+
     def summary(self):
         """Итоги сессии в лог: сколько раздач, решений и каких."""
+        self.flush_memory()
         mins = (time.time() - self.started) / 60
         counts = ' '.join(f'{k}={v}' for k, v in self.stats.items() if v)
         self.log(f'ИТОГИ: раздач={self.hand_id} решений={self.actions} '
@@ -596,6 +659,7 @@ class Bot:
         два стабильных кадра подряд = ход действительно наш (не анимация).
         """
         self.log('=== БОТ ЗАПУЩЕН (без ИИ) ===' + (' dry-run' if self.dry_run else ''))
+        self.log_memory()
         fails = 0
         acted_sig = None
         acted_ts = 0.0
@@ -615,6 +679,7 @@ class Bot:
                         continue
                     fails = 0
                     state = ts.read_state(img, tpl_dir=self.tpl_dir)
+                    self.observe(state)     # оппоненты играют как раз не на нашем ходу
                     if not (state['my_turn'] and state['in_hand']):
                         opp_acted = True    # ход не наш: оппонент думает/сыграл
                         self.stable = 0
@@ -705,12 +770,7 @@ class Bot:
 
 
 def load_players_db(path=None):
-    path = path or os.path.join(config.BASE, 'players.json')
-    try:
-        with open(path, encoding='utf-8') as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    return opponents.load(path or config.PLAYERS_FILE)
 
 
 def main(argv=None):
@@ -723,6 +783,8 @@ def main(argv=None):
     ap.add_argument('--stack', type=float, default=69.6, help='стек в ББ')
     ap.add_argument('--no-live-stack', action='store_true',
                     help='не читать свой стек с экрана (играть по --stack)')
+    ap.add_argument('--no-memory', action='store_true',
+                    help='не копить статистику оппонентов и не подстраиваться под неё')
     ap.add_argument('--max-actions', type=int, help='сыграть N решений и выйти')
     ap.add_argument('--adb', help=f'путь к adb (по умолчанию {config.ADB})')
     ap.add_argument('--serial', help=f'серийник телефона (по умолчанию {config.SERIAL})')
@@ -753,7 +815,8 @@ def main(argv=None):
     # devices.json по своему серийнику и перечитывает их перед каждым решением.
     cli_cfg = {'style': args.style, 'aggression': args.aggression,
                'defense': args.defense, 'stack': args.stack,
-               'live_stack': not args.no_live_stack}
+               'live_stack': not args.no_live_stack,
+               'opponent_memory': not args.no_memory}
     print(f'настройки: стиль {args.style}, агрессия x{args.aggression}, '
           f'защита x{args.defense}')
 
