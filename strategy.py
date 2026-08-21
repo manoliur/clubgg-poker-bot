@@ -597,6 +597,42 @@ def blocker_bluff_spot(state, chart=None, stack_bb=100.0):
     return bool(nut_blocker(hole, board))
 
 
+def hand_note(hole, board, street, to_call_bb=None, pot_bb=None):
+    """Контекст решения одной строкой для лога: что собрано, цена, эквити.
+
+    Ничего не решает — только называет то, на что смотрит decide: класс руки
+    (made) с человеческим названием, пот-оддсы и грубую оценку эквити (по аутам
+    для дро, по классу — для готовой руки). Нужен главному циклу: живой лог
+    должен показывать не только причину, но и её исходные данные.
+    """
+    out = {'made': 'preflop', 'made_note': '', 'name': '',
+           'pot_odds': pot_odds(to_call_bb, pot_bb), 'equity': None}
+    hole = [c for c in (hole or []) if c]
+    board = [c for c in (board or []) if c]
+    if len(hole) != 2:
+        out['made'] = 'unknown'
+        return out
+    if not board:
+        try:
+            out['name'] = hand_code(hole)
+        except (he.BadCard, ValueError):
+            out['made'] = 'unknown'
+        return out
+    try:
+        cls = he.hand_class(hole, board)
+    except (he.BadCard, ValueError):
+        out['made'] = 'unknown'
+        return out
+    out['made'] = cls['made']
+    out['made_note'] = cls['made_note'] or ''
+    out['name'] = cls['name'] or ''
+    if cls['made'] == 'draw' or cls['draws']:
+        out['equity'] = he.equity_from_outs(cls['outs'], street)
+    else:
+        out['equity'] = SHOWDOWN_EQUITY.get(cls['made'])
+    return out
+
+
 def _odds_note(price, equity):
     """«пот-оддсы 9%, эквити ~30%» — по этой строке видно, как принято решение."""
     shown = f'{price:.0%}' if price is not None else f'~{BLIND_PRICE:.0%} (банк неизвестен)'

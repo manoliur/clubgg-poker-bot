@@ -30,9 +30,13 @@ import opponents
 import table_state as ts
 import strategy
 
+# масти для живого лога: 'Ah' -> 'A♥'
+SUIT_SIGNS = {'s': '♠', 'h': '♥', 'd': '♦', 'c': '♣'}
 # действие -> диапазон задержки в devices.json (см. config.TIMING_DEFAULTS)
 TIMING_KEYS = {'raise': 'timing_raise', 'call': 'timing_call',
                'check': 'timing_fold', 'fold': 'timing_fold'}
+MADE_TITLES = {'preflop': 'префлоп', 'unknown': 'не разобрана'}
+
 
 def timing_ranges(cfg):
     """Диапазоны «раздумья» из записи устройства: {'timing_raise': (lo, hi), ...}.
@@ -48,6 +52,17 @@ def timing_ranges(cfg):
             lo, hi = default
         out[key] = (lo, hi) if 0 <= lo <= hi else tuple(default)
     return out
+
+
+def pretty_cards(cards):
+    """['Ah','Kd'] -> 'A♥K♦'. Нераспознанная карта — «??»."""
+    out = []
+    for c in cards or []:
+        if not c or len(c) < 2:
+            out.append('??')
+        else:
+            out.append(c[0].upper() + SUIT_SIGNS.get(c[1].lower(), c[1]))
+    return ''.join(out)
 
 
 # --------------------------------------------------------------------------
@@ -124,6 +139,7 @@ class Bot:
         self.opponent_memory = True     # флаг opponent_memory (панель)
         self.human_timing = True        # флаг human_timing (панель)
         self.timing = dict(config.TIMING_DEFAULTS)
+        self.style = strategy.DEFAULT_STYLE
         self._turn_sig = None           # сигнатура хода, который сейчас на экране
         self._turn_seen = None          # когда мы увидели его впервые (запас до таймаута)
         # копия: настройки меняются на лету (панель), чарт по умолчанию — общий на процесс
@@ -213,6 +229,40 @@ class Bot:
                 f.write(line + '\n')
         except OSError:
             pass
+
+    def active_flags(self):
+        """Включённые переключатели (стратегии и самого бота) — для истории раздач."""
+        on = [k for k in strategy.FLAG_KEYS if self.chart.settings.get(k)]
+        on += [k for k in config.BOT_FLAGS if getattr(self, k, False)]
+        return on
+
+    def decision_line(self, state, note, action, reason, amount=None):
+        """Полный контекст решения одной строкой (перед ней лог ставит время).
+
+        [#42 river] A♠Q♥ | доска 8♠8♦4♠6♥K♦ | банк 24ББ | колл 8ББ (25%) |
+        стек 61ББ | поз BTN (2 игр) | сделано: две пары 8/4 (weak) |
+        решение: fold | причина: ...
+        """
+        pot, to_call, price = state['pot_bb'], state['to_call_bb'], note['pot_odds']
+        parts = [f"[#{self.hand_id} {state['street']}] {pretty_cards(state['hole'])}"]
+        if state['board']:
+            parts.append(f"доска {pretty_cards(state['board'])}")
+        parts.append(f'банк {pot:.1f}ББ' if pot is not None else 'банк ?')
+        if not state['has_bet']:
+            parts.append('ставки нет')
+        else:
+            price_note = f' ({price:.0%})' if price is not None else ''
+            parts.append(f'колл {to_call}ББ{price_note}' if to_call is not None
+                         else f'колл ?ББ{price_note}')
+        parts.append(f'стек {self.stack_bb:.1f}ББ')
+        parts.append(f"поз {state['position'] or '?'} ({state['players']} игр)")
+        made = MADE_TITLES.get(note['made'], note['made'])
+        name = note['name'] + (f" ({note['made_note']})" if note['made_note'] else '')
+        parts.append(f"сделано: {name or '?'} ({made})")
+        size = f' {amount}ББ' if amount else ''
+        parts.append(f'решение: {action}{size}')
+        parts.append(f'причина: {reason}')
+        return ' | '.join(parts)
 
     def record(self, entry):
         try:
@@ -348,6 +398,7 @@ class Bot:
         settings = strategy.device_settings(self.base_settings, cfg)
         changed = [k for k, v in settings.items() if self.chart.settings.get(k) != v]
         self.chart.settings = settings
+        self.style = str(cfg.get('style') or strategy.DEFAULT_STYLE).lower()
         self.live_stack = bool(cfg.get('live_stack', True))
         self.opponent_memory = bool(cfg.get('opponent_memory', True))
         self.human_timing = bool(cfg.get('human_timing', True))
@@ -629,6 +680,8 @@ class Bot:
             reason = f"{reason} [{decision['action']} невозможен -> {action}]"
             amount = None
 
+        note = strategy.hand_note(state['hole'], state['board'], state['street'],
+                                  state['to_call_bb'], state['pot_bb'])
         entry = {
             'ts': time.strftime('%Y-%m-%d %H:%M:%S'),
             'hand_id': self.hand_id,
@@ -648,13 +701,17 @@ class Bot:
             'reason': reason,
             'tap': point,
             'dry_run': self.dry_run,
+            # --- контекст решения (формат расширен, старые поля не тронуты) ---
+            'made': note['made'],
+            'made_note': note['made_note'],
+            'pot_odds_pct': None if note['pot_odds'] is None else round(note['pot_odds'] * 100),
+            'equity_pct': None if note['equity'] is None else round(note['equity'] * 100),
+            'stack_bb': round(self.stack_bb, 1) if self.stack_bb else None,
+            'style': self.style,
+            'flags': self.active_flags(),
             'think_s': 0.0,
         }
-        self.log(f"#{self.hand_id} {state['street']} {state['hole']} доска={state['board']} "
-                 f"поз={state['position']} игроков={state['players']}"
-                 f"({state['players_seated']} сидят) "
-                 f"ставка={'да' if state['has_bet'] else 'нет'} -> {action.upper()} "
-                 f"({reason})")
+        self.log(self.decision_line(state, note, action, reason, amount))
         if len(hole) < 2:
             self._save_frame(img, f'{action}_badcards')
         elif self.save_frames:
