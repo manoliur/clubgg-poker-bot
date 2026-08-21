@@ -293,7 +293,9 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(self.p.db['Оппонент 3']['hands'], 10)
 
     def test_update_all_names_profiles_by_nick(self):
-        observed = {1: {'vpip': True}, 2: {'vpip': False}}
+        # место 2 без ника, но со ставкой: без единого действия оно считалось бы
+        # пустой плашкой и профиля бы не завело (см. GhostSeatTest)
+        observed = {1: {'vpip': True}, 2: {'vpip': False, 'bets': 1}}
         names = self.p.update_all(observed, nicks={1: 'PokerPro88'})
         self.assertEqual(names, ['PokerPro88', 'Оппонент 2'])
         self.assertEqual(self.p.db['PokerPro88']['notes'], opponents.NICK_NOTE)

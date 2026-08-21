@@ -203,6 +203,78 @@ class ProfilesTest(unittest.TestCase):
                 self.assertEqual(opponents.hands_word(n), word)
 
 
+class GhostSeatTest(unittest.TestCase):
+    """Пустое место: клиент рисует плашку, а сидеть за ней некому.
+
+    Живой случай игры один на один: в players.json завёлся «Оппонент 2» — 5 рук,
+    VPIP 0%, PFR 0%, за все раздачи ни одного действия. Такое место в статистику
+    попадать не должно вовсе.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='clubgg_ghost_')
+        self.p = opponents.Profiles(os.path.join(self.tmp, 'players.json'), db={})
+
+    def empty(self):
+        """Наблюдения за местом, которое ничего не сделало (и не сидит)."""
+        return {'seen': True, 'in_hand': False, 'vpip': False, 'pfr': False,
+                'three_bet': False, 'three_bet_spot': False, 'bets': 0, 'passive': 0}
+
+    def test_empty_seat_creates_no_profile(self):
+        self.assertEqual(self.p.update_all({1: self.empty(), 2: self.empty()}), [])
+        self.assertEqual(self.p.db, {})
+
+    def test_seat_that_played_gets_a_profile(self):
+        for obs in ({'vpip': True}, {'pfr': True}, {'bets': 1}, {'passive': 1}):
+            with self.subTest(obs=obs):
+                p = opponents.Profiles(self.p.path, db={})
+                self.assertEqual(p.update_all({1: dict(self.empty(), **obs)}),
+                                 ['Оппонент 1'])
+                self.assertEqual(p.db['Оппонент 1']['hands'], 1)
+
+    def test_read_nick_keeps_the_profile_without_actions(self):
+        """Человек сидит и всё сбрасывает — ник прочитан, раздача считается."""
+        names = self.p.update_all({1: self.empty()}, nicks={1: 'PokerPro88'})
+        self.assertEqual(names, ['PokerPro88'])
+        self.assertEqual(self.p.db['PokerPro88']['hands'], 1)
+        self.assertEqual(self.p.db['PokerPro88']['vpip'], 0.0)
+
+    def test_hands_of_a_known_folder_keep_counting(self):
+        """Место уже играло — его нулевые раздачи считаются, иначе VPIP уедет вверх."""
+        self.p.update_all({1: dict(self.empty(), vpip=True)})
+        self.p.update_all({1: self.empty()})
+        prof = self.p.db['Оппонент 1']
+        self.assertEqual(prof['hands'], 2)
+        self.assertAlmostEqual(prof['vpip'], 0.5)
+
+    def test_old_ghost_is_forgotten_on_the_next_empty_hand(self):
+        """Пустышка прошлых версий (5 рук, всюду нули) уходит из базы."""
+        self.p.db['Оппонент 2'] = dict(opponents.blank(opponents.SEAT_NOTE), hands=5)
+        self.assertEqual(self.p.update_all({2: self.empty()}), [])
+        self.assertNotIn('Оппонент 2', self.p.db)
+        self.assertEqual(self.p.dropped, ['Оппонент 2'])
+
+    def test_ghost_with_hand_written_notes_stays(self):
+        """В записи есть вписанное руками — стирать нельзя, даже пустую."""
+        for manual in ({'leaks': ['коллит всё подряд']}, {'fold_to_3bet': 0.4},
+                       {'notes': 'это Вася с работы'}):
+            with self.subTest(manual=manual):
+                p = opponents.Profiles(self.p.path, db={})
+                p.db['Оппонент 2'] = dict(opponents.blank(opponents.SEAT_NOTE),
+                                          hands=5, **manual)
+                self.assertEqual(p.update_all({2: self.empty()}), [])
+                self.assertIn('Оппонент 2', p.db)
+                self.assertEqual(p.db['Оппонент 2']['hands'], 5, 'руки не растут')
+                self.assertEqual(p.dropped, [])
+
+    def test_profile_with_actions_is_not_a_ghost(self):
+        self.assertTrue(opponents.is_ghost(opponents.blank()))
+        self.assertTrue(opponents.is_ghost(None))
+        self.assertFalse(opponents.is_ghost(dict(opponents.blank(), agg_calls=1)))
+        # спот 3-бета создаём мы своим рейзом — оппонент в нём мог не сделать ничего
+        self.assertTrue(opponents.is_ghost(dict(opponents.blank(), three_bet_spots=2)))
+
+
 class StubScreen:
     def grab(self):
         return None
@@ -293,6 +365,22 @@ class BotMemoryTest(unittest.TestCase):
         with open(bot.log_path, encoding='utf-8') as f:
             log = f.read()
         self.assertIn('память оппонентов: Оппонент 1 — 30 рук, VPIP 55%', log)
+
+    def test_empty_table_writes_no_file(self):
+        """Плашки нарисованы, играть некому — players.json бот не трогает."""
+        bot = self.bot()
+        frames = [state('preflop', seated=2, live=0), state('preflop', hole=('7s', '7d'))]
+        self.play(bot, frames)
+        self.assertFalse(os.path.exists(self.players))
+        self.assertEqual(bot.players_db, {})
+
+    def test_dropped_ghost_is_logged(self):
+        bot = self.bot(db={'Оппонент 1': dict(opponents.blank(opponents.SEAT_NOTE),
+                                              hands=5)})
+        bot.save_profiles({1: {'vpip': False, 'bets': 0, 'passive': 0}})
+        with open(bot.log_path, encoding='utf-8') as f:
+            self.assertIn('«Оппонент 1» — пустое место, запись стёрта', f.read())
+        self.assertNotIn('Оппонент 1', bot.players_db)
 
     def test_a_broken_frame_does_not_break_the_loop(self):
         bot = self.bot()

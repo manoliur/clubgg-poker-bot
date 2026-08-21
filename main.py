@@ -310,8 +310,13 @@ class Bot:
     def save_profiles(self, observed):
         """Итог раздачи -> players.json. Возвращает имена обновлённых профилей."""
         names = self.profiles.update_all(observed, nicks=self.nicks)
+        dropped = self.profiles.dropped
+        if not names and not dropped:
+            return names          # никто не проявился (пустые плашки) — файл не трогаем
         if not self.profiles.save():
             self.log('память оппонентов: players.json не записан')
+        for name in dropped:
+            self.log(f'память оппонентов: «{name}» — пустое место, запись стёрта')
         for name in names:
             self.log('память оппонентов: '
                      + opponents.summary_line(name, self.players_db[name]))

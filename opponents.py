@@ -44,6 +44,11 @@ PFR_MIN_CALL = 1.05
 COUNTERS = ('vpip_hands', 'pfr_hands', 'three_bet_hands', 'three_bet_spots',
             'agg_bets', 'agg_calls')
 
+# Из них — счётчики ДЕЙСТВИЙ оппонента. three_bet_spots сюда не входит: спот
+# создаём мы своим рейзом, оппонент в нём мог не сделать ничего.
+ACTION_COUNTERS = ('vpip_hands', 'pfr_hands', 'three_bet_hands',
+                   'agg_bets', 'agg_calls')
+
 
 SEAT_NOTE = 'место по кругу от героя (ник не прочитался)'
 NICK_NOTE = 'ник прочитан с экрана'
@@ -94,6 +99,35 @@ def _derive(p):
     return p
 
 
+def showed_up(obs):
+    """Место «проявилось»: за раздачу от него было хоть одно наблюдаемое действие.
+
+    Клиент рисует плашку и на пустом месте, бот считает такое место занятым —
+    и в players.json заводился «Оппонент N» с нулями во всех графах. Честно
+    наблюдаемое действие только одно из четырёх: остался в раздаче на флопе и
+    дальше (vpip), поднял префлоп (pfr/3-бет), поставил или заколлировал
+    постфлоп. Раздача, где не было ничего из этого, ничего об оппоненте не
+    говорит — за пустым местом её вообще не было.
+    """
+    obs = obs or {}
+    return bool(obs.get('vpip') or obs.get('pfr') or obs.get('three_bet')
+                or int(obs.get('bets') or 0) or int(obs.get('passive') or 0))
+
+
+def is_ghost(p):
+    """Профиль без единого действия: руки копились, а играть было некому."""
+    if not isinstance(p, dict):
+        return True                  # профиля нет — место себя ещё не показало
+    return not any(int(p.get(k) or 0) for k in ACTION_COUNTERS)
+
+
+def has_manual(p):
+    """В записи есть вписанное руками: лики, fold_to_3bet, своя заметка."""
+    if p.get('leaks') or p.get('fold_to_3bet') is not None:
+        return True
+    return (p.get('notes') or '').strip() not in ('', SEAT_NOTE, NICK_NOTE)
+
+
 def hands_word(n):
     """1 рука, 2 руки, 5 рук — иначе лог читается по-машинному."""
     n = abs(int(n))
@@ -122,6 +156,7 @@ class Profiles:
     def __init__(self, path=None, db=None):
         self.path = path or PLAYERS_FILE
         self.db = db if db is not None else load(self.path)
+        self.dropped = []             # пустышки, стёртые последним update_all
 
     def profile(self, name, create=False, notes=''):
         p = self.db.get(name)
@@ -149,15 +184,46 @@ class Profiles:
 
         nicks — {место: ник}, прочитанное с экрана в этой раздаче. Места, ника
         которых там нет, пишутся по-старому, под именем места.
+
+        Место, которое НЕ проявилось (ни ника, ни действия) и по которому нечего
+        вспомнить (профиля нет или в нём одни нули), пропускается совсем: пустая
+        плашка не должна плодить «Оппонент N» с нулевой статистикой. Как только
+        место хоть раз сыграло, его нулевые раздачи считаются как раньше — иначе
+        у молчаливого фолдера VPIP уехал бы к 100%. Стёртые пустышки — в
+        self.dropped.
         """
         nicks = nicks or {}
-        names = []
+        names, self.dropped = [], []
         for seat, obs in sorted(observed.items()):
             nick = nicks.get(seat)
             name = player_name(seat, nick)
+            known = self.profile(name)          # заодно дописывает счётчики
+            if not nick and not showed_up(obs) and is_ghost(known):
+                if self.forget_ghost(name):
+                    self.dropped.append(name)
+                continue
             self.update(name, obs, notes=NICK_NOTE if nick else SEAT_NOTE)
             names.append(name)
         return names
+
+    def forget_ghost(self, name):
+        """Стереть запись места, которое так и не проявилось. True — стёрли.
+
+        Пустышки прошлых версий не удаляются скопом: вдруг за местом сидит живой
+        фолдер с нечитаемым ником. Но если запись снова обновляется нулями —
+        значит, там и правда никого нет, и она уходит. Проявится тот же игрок —
+        профиль заведётся заново, терять в такой записи нечего.
+
+        Не трогаем то, что вписано руками (лики, fold_to_3bet, своя заметка), и
+        след переноса статистики (merged_into).
+        """
+        p = self.db.get(name)
+        if not isinstance(p, dict) or p.get('merged_into'):
+            return False
+        if not is_ghost(p) or has_manual(p):
+            return False
+        del self.db[name]
+        return True
 
     def merge(self, src, dst):
         """Перенести статистику профиля src в профиль dst. Возвращает: рук перенесено.
