@@ -77,6 +77,22 @@ THREE_BET_VALUE_HU = '77+, ATs+, AQo+, KQs'
 # 4-бет / олл-ин на префлопе
 FOUR_BET = 'QQ+, AKs, AKo'
 
+# --- столы на 7-9 человек ------------------------------------------------
+# Таблицы выше рассчитаны на 6-max. За столом на 7-9 человек у каждой позиции
+# на 2-3 оппонента ПОЗАДИ больше, чем у одноимённой строки таблицы (9-max UTG
+# ждёт хода восьмерых, 6-max UTG — пятерых), поэтому играть её строкой нельзя:
+# именно так бот и «терялся», открывая KTs с UTG за девятеркой. Сдвиг ведёт к
+# БОЛЕЕ РАННЕЙ строке (=уже), на две позиции для ранних и на одну-две для
+# средних; UTG остаётся собой — тише строки в таблице нет. CO/BTN/SB/BB не
+# двигаются: у них позади ровно столько же игроков, что и в 6-max.
+NINE_MAX_SEATS = 7          # с семи сидящих таблица играется со сдвигом
+NINE_MAX_SHIFT = {
+    'utg1': 'utg',          # 7-я от баттона играет строкой UTG
+    'mp':   'utg',          # 6-я — тоже UTG (в таблице тише строки нет)
+    'mp1':  'utg1',         # 5-я — строкой UTG+1
+    'hj':   'mp',           # 4-я — строкой MP
+}
+
 PREMIUM = 'JJ+, AQs+, AKo'
 # Короткий стек: с чем идём в алл-ин вместо мин-рейза (пересекается с диапазоном
 # открытия по позиции — с BTN пушим шире, чем с UTG).
@@ -387,6 +403,12 @@ class Chart:
                                                  else 'встроенный')
         self.open = {**_pos_table(OPEN_RANGES), **_pos_table(data.get('open'))}
         self.call = {**_pos_table(CALL_RANGES), **_pos_table(data.get('call'))}
+        # "max_players": 9 — в файле лежат НАСТОЯЩИЕ 9-max диапазоны, эвристику
+        # сдвига применять не надо: ключи позиций берутся напрямую
+        try:
+            self.max_players = int(data.get('max_players') or data.get('players') or 0) or None
+        except (TypeError, ValueError):
+            self.max_players = None
         self.three_bet = data.get('three_bet', THREE_BET_VALUE)
         self.three_bet_hu = data.get('three_bet_hu', THREE_BET_VALUE_HU)
         self.four_bet = data.get('four_bet', FOUR_BET)
@@ -405,18 +427,40 @@ class Chart:
         other.settings = dict(self.settings)
         return other
 
+    def nine_max_key(self, position, players):
+        """Строка таблицы, которой позиция играется за столом на 7-9 человек.
+
+        None — сдвиг не нужен: стол до 6 человек, поздняя позиция или чарт с
+        явным "max_players": 9 (там диапазоны уже 9-max, двигать нечего).
+        """
+        if (players is None or players < NINE_MAX_SEATS
+                or self.max_players == 9):
+            return None
+        return NINE_MAX_SHIFT.get(_pos_key(position))
+
+    def nine_max_shift(self, players):
+        """За столом на 7-9 человек 6-max таблица играется со сдвигом?"""
+        return (players is not None and players >= NINE_MAX_SEATS
+                and self.max_players != 9)
+
     def range_for(self, position, players, kind='open'):
         """Диапазон для позиции: хедз-ап отдельный, иначе 6-max таблицы.
 
         players здесь — число СИДЯЩИХ за столом (players_seated), а не число в
         раздаче: на столе 4-max с одним сфолдившим всё равно 6-max-таблица,
         а не HU (раньше бот играл HU_SB против 3-4-max столов — живой тест).
+
+        От семи сидящих ранние и средние позиции берут более раннюю (=узкую)
+        строку таблицы, см. NINE_MAX_SHIFT.
         """
         table = self.open if kind == 'open' else self.call
         if players is not None and players <= 2:
             key = 'husb' if position in (None, 'SB', 'BTN') else 'hubb'
             return table.get(key)
-        return table.get(_pos_key(position)) or table.get('mp')   # неизвестная — средняя
+        key = self.nine_max_key(position, players) or _pos_key(position)
+        # неизвестная позиция — средняя (за большим столом тоже со сдвигом)
+        default = self.nine_max_key('mp', players) or 'mp'
+        return table.get(key) or table.get(default)
 
     def size(self, key):
         """Размер ставки с учётом общей агрессии чарта."""
@@ -459,6 +503,10 @@ class Chart:
                         'husb', 'hubb'):
                 if pos in table:
                     lines.append(f'  {kind:9} {pos.upper():5} {table[pos]}')
+        lines.append('  стол      ' + ('9-max: диапазоны как есть, без сдвига'
+                                       if self.max_players == 9 else
+                                       f'6-max; от {NINE_MAX_SEATS} сидящих ранние позиции '
+                                       'играются более ранней строкой'))
         lines.append(f'  3-бет     {self.three_bet} | HU {self.three_bet_hu}')
         lines.append(f'  4-бет     {self.four_bet}')
         lines.append('  размеры   ' + ', '.join(f'{k}={v}' for k, v in self.settings.items()))
@@ -518,8 +566,11 @@ def load_chart(path):
     if not isinstance(data, dict):
         raise ValueError(f'{path}: ожидался объект с ключами open/call/postflop')
     # чарт без секций open/call — это плоская таблица только для открытия
+    # (флаг размера стола к таблице позиций не относится — снимаем его заранее)
+    meta = {k: data.pop(k) for k in ('max_players', 'players') if k in data}
     if not any(k in data for k in ('open', 'call', 'postflop', 'three_bet', 'four_bet')):
         data = {'open': data}
+    data.update(meta)
     try:
         return Chart(data, path=path)
     except ValueError as e:
@@ -807,6 +858,17 @@ def _versus(no_raise, to_call_bb, stack_bb):
 
 def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb, chart=None,
                    no_raise=False, hero_raised=False, live_players=None):
+    """Решение на префлопе + пометка о большом столе в логе (см. _decide_preflop)."""
+    decision = _decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb,
+                               chart, no_raise=no_raise, hero_raised=hero_raised,
+                               live_players=live_players)
+    if (chart or _ACTIVE).nine_max_shift(players):
+        decision['reason'] += f' [9-max стол ({players} сидящих) — ранние позиции сужены]'
+    return decision
+
+
+def _decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb, chart=None,
+                    no_raise=False, hero_raised=False, live_players=None):
     """Решение на префлопе. no_raise — рейз недоступен (оппонент в алл-ине).
 
     Когда рейзить нечем или ставка перед нами размером с полстека, чарты 3-бета

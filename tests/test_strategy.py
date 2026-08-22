@@ -816,5 +816,131 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(st.decide(base, profile=ripe)['action'], 'check')
 
 
+class NineMaxTest(unittest.TestCase):
+    """Столы на 7-9 человек: ранние позиции играются более ранней строкой таблицы.
+
+    Таблицы рассчитаны на 6-max, и за девяткой у одноимённой позиции позади на
+    2-3 оппонента больше — играть строку как есть значит открывать мусором с
+    ранних мест. Поздние позиции (CO/BTN/SB/BB) не двигаются: там игроков позади
+    ровно столько же, что и в 6-max.
+    """
+
+    def rng(self, pos, seated, kind='open'):
+        return st.range_for(pos, seated, kind)
+
+    def hands(self, spec):
+        return st.parse_range(spec)
+
+    def test_early_position_is_narrower_at_a_big_table(self):
+        """8 сидящих, MP — строка UTG: уже, чем MP в 6-max."""
+        self.assertEqual(self.rng('MP', 8), st.OPEN_RANGES['UTG'])
+        self.assertLess(self.hands(self.rng('MP', 8)), self.hands(self.rng('MP', 6)))
+
+    def test_utg_stays_the_tightest_row(self):
+        """Тише строки UTG в таблице нет — сдвигать её некуда."""
+        self.assertEqual(self.rng('UTG', 8), st.OPEN_RANGES['UTG'])
+        self.assertEqual(self.rng('UTG', 8), self.rng('UTG', 6))
+
+    def test_shift_is_monotone_by_position(self):
+        """Чем раньше позиция за большим столом, тем уже диапазон."""
+        keys = ['UTG', 'UTG+1', 'MP', 'MP+1', 'HJ', 'CO', 'BTN']
+        sizes = [len(self.hands(self.rng(p, 9))) for p in keys]
+        self.assertEqual(sizes, sorted(sizes), list(zip(keys, sizes)))
+
+    def test_late_positions_are_not_shifted(self):
+        for pos in ('CO', 'BTN', 'SB', 'BB'):
+            self.assertEqual(self.rng(pos, 8), st.OPEN_RANGES[pos], pos)
+            self.assertEqual(self.rng(pos, 8), self.rng(pos, 6), pos)
+
+    def test_call_ranges_shift_too(self):
+        self.assertEqual(self.rng('HJ', 9, 'call'), st.CALL_RANGES['MP'])
+        self.assertEqual(self.rng('BTN', 9, 'call'), st.CALL_RANGES['BTN'])
+
+    def test_shift_starts_at_seven_seated(self):
+        self.assertEqual(self.rng('MP', 6), st.OPEN_RANGES['MP'])
+        self.assertEqual(self.rng('MP', 7), st.OPEN_RANGES['UTG'])
+
+    def test_small_tables_unchanged(self):
+        """4 сидящих — как раньше, 2 — хедз-ап."""
+        self.assertEqual(self.rng('MP', 4), st.OPEN_RANGES['MP'])
+        self.assertEqual(self.rng('BTN', 4), st.OPEN_RANGES['BTN'])
+        self.assertEqual(self.rng('SB', 2), st.OPEN_RANGES['HU_SB'])
+        self.assertEqual(self.rng('BB', 2), st.OPEN_RANGES['HU_BB'])
+
+    def test_unknown_position_uses_shifted_default(self):
+        """Неизвестная позиция — средняя, но за большим столом тоже со сдвигом."""
+        self.assertEqual(self.rng(None, 6), st.OPEN_RANGES['MP'])
+        self.assertEqual(self.rng(None, 8), st.OPEN_RANGES['UTG'])
+
+    def test_explicit_nine_max_chart_is_used_as_is(self):
+        """В чарте с "max_players": 9 лежат настоящие 9-max диапазоны — без сдвига."""
+        chart = st.Chart({'max_players': 9, 'open': {'UTG': 'AA', 'MP': 'KK'}})
+        self.assertEqual(chart.range_for('UTG', 9), 'AA')
+        self.assertEqual(chart.range_for('MP', 9), 'KK')
+        self.assertIsNone(chart.nine_max_key('MP', 9))
+        self.assertFalse(chart.nine_max_shift(9))
+        # ключ "players" — синоним
+        self.assertEqual(st.Chart({'players': 9, 'open': {'MP': 'KK'}}).range_for('MP', 9), 'KK')
+        # чарт без флага — эвристика работает и по его собственным строкам
+        self.assertEqual(st.Chart({'open': {'UTG': 'AA', 'MP': 'KK'}}).range_for('MP', 9), 'AA')
+
+    def test_flat_chart_with_flag_still_loads(self):
+        """Плоская таблица (без секции open) + флаг стола — файл читается."""
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False,
+                                         encoding='utf-8') as f:
+            json.dump({'max_players': 9, 'UTG': 'AA', 'MP': 'KK'}, f)
+            path = f.name
+        try:
+            chart = st.load_chart(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(chart.max_players, 9)
+        self.assertEqual(chart.range_for('MP', 9), 'KK')
+
+    def test_open_is_folded_from_early_position_at_a_big_table(self):
+        """KTs: в 6-max с MP открытие, за столом на 8 — уже вне диапазона.
+
+        KTs входит в строку MP ('KTs+'), но не в строку UTG ('KQs'), а за
+        восьмёркой MP играется строкой UTG — значит открывать нечем.
+        """
+        hand = ['Kh', 'Th']
+        six = st.decide(state(hole=hand, position='MP', players=6, players_seated=6))
+        self.assertEqual(six['action'], 'raise', six['reason'])
+        eight = st.decide(state(hole=hand, position='MP', players=8, players_seated=8))
+        self.assertEqual(eight['action'], 'check', eight['reason'])
+
+    def test_premium_still_opens_at_a_big_table(self):
+        d = st.decide(state(hole=['Ah', 'Ad'], position='UTG', players=9, players_seated=9))
+        self.assertEqual(d['action'], 'raise', d['reason'])
+
+    def test_button_keeps_its_range_at_a_big_table(self):
+        """98s с BTN: за восьмёркой открывается так же, как в 6-max."""
+        hand = ['9h', '8h']
+        d = st.decide(state(hole=hand, position='BTN', players=8, players_seated=8))
+        self.assertEqual(d['action'], 'raise', d['reason'])
+
+    def test_log_mentions_nine_max(self):
+        d = st.decide(state(hole=['Ah', 'Ad'], position='UTG', players=8, players_seated=8))
+        self.assertIn('9-max', d['reason'])
+        self.assertIn('8 сидящих', d['reason'])
+        six = st.decide(state(hole=['Ah', 'Ad'], position='UTG', players=6, players_seated=6))
+        self.assertNotIn('9-max', six['reason'])
+
+    def test_log_is_quiet_with_an_explicit_nine_max_chart(self):
+        chart = st.Chart({'max_players': 9})
+        d = st.decide(state(hole=['Ah', 'Ad'], position='UTG', players=8, players_seated=8),
+                      chart=chart)
+        self.assertNotIn('9-max стол', d['reason'])
+
+    def test_postflop_is_not_touched(self):
+        """Постфлоп сдвиг не задевает: пометки о столе в логе нет."""
+        d = st.decide(state(hole=['9h', '9c'], board=['9d', '5s', '2c'], street='flop',
+                            has_bet=True, to_call_bb=3.0, pot_bb=6.0,
+                            players=8, players_seated=8))
+        self.assertNotIn('9-max', d['reason'])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
