@@ -250,6 +250,14 @@ HERO_RERAISE_OPEN_MULT = 1.0
 # Запас к оценке лимпов (ББ): чужой блайнд и лимпер, успевший сбросить карты.
 LIMP_SLACK_BB = 1.5
 
+# Перед нами ЛИМП, а не рейз: доплата не больше блайнда.
+LIMP_TO_CALL_BB = 1.0
+# Изо-рейз против лимпа: столько открытий (2.5 x 2.5 = 6.25ББ).
+LIMP_ISO_MULT = 2.5
+# Стек, ниже которого рейз против лимпа и пуш неразличимы: рейз всё равно
+# забирает почти весь стек, так что премиум идёт сразу в алл-ин.
+PUSH_ONLY_STACK_BB = 15.0
+
 
 # --------------------------------------------------------------------------
 # разбор рук и диапазонов
@@ -778,6 +786,17 @@ def is_squeeze(pot_bb, to_call_bb, position=None, live_players=None):
     return dead > limps
 
 
+def _limp_before_us(to_call_bb, stack_bb):
+    """Перед нами лимп, и стека хватает, чтобы рейз отличался от пуша.
+
+    Доплата не больше блайнда — значит никто не поднимал, и премиум на коротком
+    стеке зарабатывает рейзом, а не алл-ином. На стеке от PUSH_ONLY_STACK_BB и
+    ниже разницы нет: рейз в 6ББ и так половина стека.
+    """
+    return (to_call_bb is not None and to_call_bb <= LIMP_TO_CALL_BB
+            and bool(stack_bb) and stack_bb > PUSH_ONLY_STACK_BB)
+
+
 def _versus(no_raise, to_call_bb, stack_bb):
     """Как назвать ставку, на которую отвечаем: алл-ин или просто крупная."""
     if no_raise:
@@ -881,6 +900,13 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
                   stack_bb, pot_frac=1.0)
     if not no_raise and not (big and not premium):
         if in_range(hole, chart.four_bet):
+            if short and _limp_before_us(to_call_bb, stack_bb):
+                # Против лимпа пуш собирает одни фолды: оппонент вложил полблайнда
+                # и на 30ББ не ответит ничем, что мы бы обыграли. Живая раздача
+                # #20 от 22.08: AA на 30ББ пушила против лимпа 0.5ББ и забирала
+                # блайнды. Рейз в 2.5 открытия оставляет цену, за которую платят.
+                return _d('raise', f'{code}: премиум против лимпа — рейз, не пуш{note}',
+                          open_size * LIMP_ISO_MULT)
             if short:
                 return _d('raise', f'{code}: премиум — алл-ин {stack_bb:.0f}ББ{note}',
                           stack_bb, pot_frac=1.0)

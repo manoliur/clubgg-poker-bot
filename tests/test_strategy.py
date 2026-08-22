@@ -392,6 +392,48 @@ class HeadsUpReraiseTest(unittest.TestCase):
         self.assertIn(d['action'], ('call', 'raise'), d['reason'])
 
 
+class PremiumVsLimpTest(unittest.TestCase):
+    """Короткий стек с премиумом против ЛИМПА рейзит, а не пушит.
+
+    Живая раздача #20 от 22.08: AA на 30ББ ушла в алл-ин против лимпа 0.5ББ —
+    оппонент, вложивший полблайнда, на это только сбрасывает, и велью теряется.
+    Пуш остаётся против настоящей ставки и на стеке, где рейз и так весь стек.
+    """
+
+    def hand(self, hole, to_call, stack_bb, **kw):
+        base = {'hole': hole, 'position': 'BTN', 'players': 6, 'players_seated': 6,
+                'has_bet': True, 'to_call_bb': to_call, 'pot_bb': to_call + 2.0}
+        base.update(kw)
+        return st.decide(state(**base), stack_bb=stack_bb)
+
+    def test_against_a_limp_the_premium_raises(self):
+        d = self.hand(['Ah', 'Ad'], 0.5, 28.0)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertIn('против лимпа — рейз, не пуш', d['reason'])
+        self.assertIn('короткий стек', d['reason'])
+        self.assertLess(d['amount_bb'], 28.0, d['reason'])
+        self.assertGreater(d['amount_bb'], st.OPEN_SIZE_BB, d['reason'])
+
+    def test_on_a_tiny_stack_the_raise_is_the_push(self):
+        """15ББ и меньше: рейз в 6ББ — половина стека, разницы с пушем нет."""
+        d = self.hand(['Ah', 'Ad'], 0.5, 10.0)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertEqual(d['amount_bb'], 10.0, d['reason'])
+        self.assertIn('алл-ин', d['reason'])
+
+    def test_against_a_real_raise_the_premium_still_pushes(self):
+        d = self.hand(['Ah', 'Ad'], 2.5, 28.0)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertEqual(d['amount_bb'], 28.0, d['reason'])
+        self.assertIn('алл-ин', d['reason'])
+
+    def test_a_deep_stack_opens_as_before(self):
+        """Стек не короткий — лимп изо-рейзится обычным путём, правило не при чём."""
+        d = self.hand(['Ah', 'Ad'], 0.5, 100.0)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertNotIn('против лимпа', d['reason'])
+
+
 class PreflopMoneyTest(unittest.TestCase):
     """Что бот вычитает из банка: сколько вложено до нашего хода и кем."""
 
