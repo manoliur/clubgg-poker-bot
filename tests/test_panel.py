@@ -151,6 +151,11 @@ class PanelTest(unittest.TestCase):
         patcher = mock.patch.object(panel, 'DEVICES_FILE', self.path)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # изолировать от ЖИВОГО бота: resume() не должен подхватывать
+        # pid-файл реально запущенного процесса (ломало тесты, когда бот играет)
+        logs = mock.patch.object(panel, 'LOGS_DIR', os.path.join(self.tmp, 'logs'))
+        logs.start()
+        self.addCleanup(logs.stop)
         self.mgr = panel.BotManager()
 
     def test_defaults_are_written_with_a_style(self):
@@ -444,6 +449,9 @@ class StatsApiTest(unittest.TestCase):
         patcher = mock.patch.object(panel, 'DEVICES_FILE', self.path)
         patcher.start()
         self.addCleanup(patcher.stop)
+        logs = mock.patch.object(panel, 'LOGS_DIR', os.path.join(self.tmp, 'logs'))
+        logs.start()
+        self.addCleanup(logs.stop)
         self.mgr = panel.BotManager()
         self.mgr.history = stats.History(self.history)
         self.serial = self.mgr.devices[0]['serial']
@@ -562,6 +570,9 @@ class HttpRoutesTest(unittest.TestCase):
                                     os.path.join(self.tmp, 'devices.json'))
         patcher.start()
         self.addCleanup(patcher.stop)
+        logs = mock.patch.object(panel, 'LOGS_DIR', os.path.join(self.tmp, 'logs'))
+        logs.start()
+        self.addCleanup(logs.stop)
         self.mgr = panel.BotManager()
         online = mock.patch.object(self.mgr, 'adb_online', return_value=[])
         online.start()
