@@ -361,6 +361,26 @@ def _full_house_grade(board, score):
     return 'strong', ''
 
 
+# Кикер топ-пары. «Туз с семёркой» и «туз с королём» на доске A-9-2 — одна и та
+# же пара тузов, но разные руки: вторую платит любой туз с кикером ниже, первую
+# бьёт почти любой туз оппонента. Классы силы (made) от кикера не зависят —
+# градация идёт отдельным полем, чтобы стратегия чуть двигала пороги.
+_KICKER_STRONG = RANK_VALUE['K']       # A/K — с таким кикером пара выдерживает больше
+_KICKER_MEDIUM = RANK_VALUE['T']       # Q/J/T — обычный кикер, ниже — слабый
+
+
+def _kicker_grade(hv, matched):
+    """Сила кикера топ-пары: 'strong' (A/K), 'medium' (Q/J/T), 'weak' (ниже T)."""
+    if len(hv) != 2:
+        return None
+    kicker = hv[1] if hv[0] == matched else hv[0]
+    if kicker >= _KICKER_STRONG:
+        return 'strong'
+    if kicker >= _KICKER_MEDIUM:
+        return 'medium'
+    return 'weak'
+
+
 def _board_flush_threat(hole, board):
     """На доске 4+ карты одной масти, а флеша у нас нет — у оппонента он возможен."""
     hp, bp = parse_cards(hole), parse_cards(board)
@@ -407,7 +427,7 @@ def _classify(hole, board):
     """Сам разбор руки (без кэша) — см. hand_class."""
     hole, board = list(hole), list(board)
     cards = hole + board
-    result = {'draws': [], 'pair_type': None, 'made_note': ''}
+    result = {'draws': [], 'pair_type': None, 'made_note': '', 'kicker_grade': None}
     if len(cards) >= 5:
         score = evaluate(cards)
     else:
@@ -434,6 +454,7 @@ def _classify(hole, board):
                 matched = max(v for v in hv if v in bv)
                 if matched == bv[0]:
                     result['pair_type'] = 'top'
+                    result['kicker_grade'] = _kicker_grade(hv, matched)
                 elif matched == bv[-1]:
                     result['pair_type'] = 'bottom'
                 else:

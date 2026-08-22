@@ -134,6 +134,8 @@ DEFAULT_SETTINGS = {
     'blocker_bluff_every': 3,     # не чаще одной такой ситуации из трёх
     # --- игра без позиции ---
     'position_aware': False,
+    # --- кикер топ-пары (см. KICKER_PRICE_MULT) ---
+    'kicker_grades': True,
     # --- сколько рук нужно метрике профиля, чтобы её применять (metric_ready) ---
     'min_hands_vpip': MIN_PROFILE_HANDS,
     'min_hands_pfr': MIN_PROFILE_PFR,
@@ -182,7 +184,7 @@ STYLE_TITLES = {'tighty': 'Тайтовый', 'standard': 'Стандарт',
                 'aggressive': 'Агрессивный', 'loose': 'Лузовый'}
 # Переключатели «вкл/выкл» — панель пишет их в devices.json как true/false.
 FLAG_KEYS = ('bet_sizing', 'multiway_tight', 'short_stack_mode', 'blocker_bluff',
-             'position_aware')
+             'position_aware', 'kicker_grades')
 # Ключи настроек, которые панель может класть прямо в запись устройства.
 # 'aggression' исключён: в devices.json это ползунок-множитель, а не сама настройка.
 DEVICE_SETTING_KEYS = tuple(k for k in DEFAULT_SETTINGS if k != 'aggression')
@@ -191,6 +193,12 @@ DEVICE_SETTING_KEYS = tuple(k for k in DEFAULT_SETTINGS if k != 'aggression')
 # Крупная ставка почти всегда значит, что у оппонента тоже что-то есть, поэтому
 # слабый флеш (наша карта масти 6) выигрывает у алл-ина примерно в трети случаев.
 SHOWDOWN_EQUITY = {'nuts': 0.85, 'strong': 0.65, 'medium': 0.45, 'weak': 0.30}
+# Кикер топ-пары (hand_evaluator.hand_class -> kicker_grade) двигает порог цены,
+# по которой средняя рука отвечает на ставку: туз с королём на A-9-2 платит
+# заметно чаще, чем туз с семёркой, а тот бьётся почти любым тузом оппонента.
+# Класс силы (made) остаётся прежним — меняется только цена.
+KICKER_PRICE_MULT = {'strong': 1.2, 'medium': 1.0, 'weak': 0.85}
+KICKER_NOTE = {'strong': 'кикер A/K', 'medium': '', 'weak': 'кикер слабый'}
 CALL_MARGIN = 0.05          # запас: коллим, когда цена заметно ниже эквити
 BLIND_PRICE = 0.33          # цена колла, когда чисел банка нет (ставка ~полбанка)
 
@@ -951,7 +959,7 @@ class Spot:
                  'pot_bb', 'stack_bb', 'players', 'no_raise', 'multiway', 'short',
                  'oop', 'bluff_ok', 'hu', 'cls', 'made', 'name', 'outs', 'draws',
                  'category', 'big_made', 'price', 'price_mult', 'showdown',
-                 'all_in', 'semi')
+                 'all_in', 'semi', 'kicker', 'kicker_mult')
 
     def __init__(self, hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb,
                  players, chart, no_raise, multiway, short, oop, bluff_ok):
@@ -977,6 +985,10 @@ class Spot:
         # младшим флешем банк не растят, а против крупной ставки считают шансы.
         self.big_made = cls['category'] is not None and cls['category'] >= he.STRAIGHT
         self.showdown = SHOWDOWN_EQUITY.get(cls['made'], 0.0)
+        # кикер топ-пары: класс силы прежний, но цена колла у «туза с королём» и
+        # «туза с семёркой» разная (выключается флагом kicker_grades)
+        self.kicker = cls.get('kicker_grade') if st['kicker_grades'] else None
+        self.kicker_mult = KICKER_PRICE_MULT.get(self.kicker, 1.0)
 
         # --- цена ---
         self.price = pot_odds(to_call_bb, pot_bb)
@@ -1005,6 +1017,16 @@ class Spot:
     def odds(self, equity=None):
         return _odds_note(self.price, self.showdown if equity is None else equity)
 
+    def context(self, *extra):
+        """Что бот учёл кроме названия комбинации — в скобках, для лога и панели.
+
+        «(кикер A/K)», «(доска опасная (3 в масть) | оппонент слаб (чек-чек))» —
+        по строке решения должно быть видно, ПОЧЕМУ порог сдвинулся, иначе
+        разбирать живую раздачу по логу нельзя.
+        """
+        parts = [p for p in (KICKER_NOTE.get(self.kicker, ''),) + extra if p]
+        return f' ({" | ".join(parts)})' if parts else ''
+
 
 def _answer_bet(spot):
     """Строка матрицы «перед нами ставка»: колл, фолд или рейз."""
@@ -1024,10 +1046,11 @@ def _answer_bet(spot):
         kind = made if st['bet_sizing'] else 'strong'
         return _raise_pot(f'{name}: рейз на велью', spot.pot_bb, spot.bet_frac(kind, mult=1.5))
     if made == 'medium':
-        cap = st['medium_max_price'] * spot.price_mult
+        cap = st['medium_max_price'] * spot.price_mult * spot.kicker_mult
+        note = spot.context()
         if price is not None and price > cap:
-            return _d('fold', f'{name}: средняя рука, {spot.odds()} — фолд')
-        return _d('call', f'{name}: колл со средней рукой, {spot.odds()}')
+            return _d('fold', f'{name}: средняя рука{note}, {spot.odds()} — фолд')
+        return _d('call', f'{name}: колл со средней рукой{note}, {spot.odds()}')
     if made == 'draw' or spot.draws:
         return _answer_bet_draw(spot)
     if (price is not None and price < st['cheap_price'] * spot.price_mult

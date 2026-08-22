@@ -217,6 +217,47 @@ class HandClassTest(unittest.TestCase):
         self.assertEqual(c['made'], 'unknown')
 
 
+class KickerGradeTest(unittest.TestCase):
+    """Кикер топ-пары: «туз с королём» и «туз с семёркой» — разные руки.
+
+    Класс силы (made) при этом НЕ меняется: это по-прежнему одна пара, просто с
+    сильным кикером её платят чаще, а со слабым чаще бьют.
+    """
+
+    BOARD = ['Ad', '9s', '2c']
+
+    def grade(self, hole):
+        return hand_class(hole, self.BOARD)['kicker_grade']
+
+    def test_ace_and_king_are_strong(self):
+        self.assertEqual(self.grade(['Ah', 'Kc']), 'strong')
+        self.assertEqual(self.grade(['Ah', 'Ks']), 'strong')
+
+    def test_broadway_is_medium(self):
+        for kicker in ('Qc', 'Jc', 'Tc'):
+            with self.subTest(kicker=kicker):
+                self.assertEqual(self.grade(['Ah', kicker]), 'medium')
+
+    def test_below_ten_is_weak(self):
+        for kicker in ('8c', '7c', '3c'):
+            with self.subTest(kicker=kicker):
+                self.assertEqual(self.grade(['Ah', kicker]), 'weak')
+
+    def test_kicker_does_not_change_the_made_class(self):
+        for hole in (['Ah', 'Kc'], ['Ah', 'Jc'], ['Ah', '3c']):
+            with self.subTest(hole=hole):
+                self.assertEqual(hand_class(hole, self.BOARD)['made'], 'medium')
+                self.assertEqual(hand_class(hole, self.BOARD)['pair_type'], 'top')
+
+    def test_only_top_pair_is_graded(self):
+        """Оверпара, младшая пара и всё, что не пара, кикером не меряются."""
+        self.assertIsNone(hand_class(['Kh', 'Kd'], self.BOARD)['kicker_grade'])   # underpair
+        self.assertIsNone(hand_class(['9h', 'Kd'], self.BOARD)['kicker_grade'])   # middle
+        self.assertIsNone(hand_class(['Qh', 'Qd'], ['9d', '5s', '2c'])['kicker_grade'])
+        self.assertIsNone(hand_class(['Ah', 'Ac'], self.BOARD)['kicker_grade'])   # сет
+        self.assertIsNone(hand_class(['7h', '2d'], self.BOARD)['kicker_grade'])   # воздух
+
+
 class MadeHandRankTest(unittest.TestCase):
     """Флеш и стрит — не автоматически натс: решает ранг НАШЕЙ карты.
 
