@@ -305,6 +305,31 @@ class MainLoopTest(IsolatedBotTest):
         self.assertEqual(entry['action'], 'fold', entry['reason'])
         self.assertFalse(bot.raised_preflop)
 
+    def test_the_same_cards_in_a_row_are_two_different_hands(self):
+        """Две раздачи подряд с одной парой (1 к 1326) — граница по пустому столу.
+
+        По смене карманных карт такая пара шла за одну раздачу: raised_preflop
+        оставался взведённым, порог «перед нами ререйз» падал с three_bet_mult
+        до 1.6 открытия, и AJo пасовала обычному открытию в 5ББ.
+        """
+        bot, _ = self.raising_bot(hole=('Ah', 'Js'))
+        first = bot.hand_id
+
+        def facing_open():
+            s = self.preflop_state(hole=('Ah', 'Js'), has_bet=True, to_call=5.0)
+            s['pot_bb'] = 12.0
+            return s
+
+        # та же раздача: 5ББ поверх нашего рейза — это ререйз, AJo пасует
+        self.assertEqual(bot.step(state=facing_open())['action'], 'fold')
+        self.assertEqual(bot.hand_id, first, 'карты те же — раздача та же')
+        for _ in range(Bot.HAND_OVER_FRAMES):        # между раздачами стол пуст
+            bot.track_hand({'hole': [], 'board': []})
+        self.assertFalse(bot.raised_preflop, 'раздача закрыта — свой рейз забыт')
+        entry = bot.step(state=facing_open())
+        self.assertEqual(bot.hand_id, first + 1, 'те же карты, но раздача новая')
+        self.assertEqual(entry['action'], 'call', entry['reason'])
+
     def test_a_postflop_raise_is_not_a_preflop_raise(self):
         bot, _ = self.make_bot([], tpl_dir=self.tpl)
         entry = bot.step(state=self.preflop_state(hole=('9h', '9c'),

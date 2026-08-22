@@ -143,6 +143,15 @@ class ObserverTest(unittest.TestCase):
         s['seats'] = [{'x': 1, 'y': 1, 'hero': False, 'in_hand': True}]
         self.assertIsNone(self.hand([s]))
 
+    def test_table_reset_closes_the_hand_too(self):
+        """Стол обнулился — раздача закрыта, хотя карманные карты и не менялись."""
+        self.obs.observe(state('preflop'))
+        self.obs.observe(state('flop'))
+        done = self.obs.table_reset()
+        self.assertIsNotNone(done)
+        self.assertTrue(done[1]['vpip'])
+        self.assertIsNone(self.obs.table_reset(), 'закрывать больше нечего')
+
 
 class ProfilesTest(unittest.TestCase):
     def setUp(self):
@@ -368,9 +377,28 @@ class SoloOpponentTest(unittest.TestCase):
         bot = self.bot(db=self.db(), nicks={1: 'Вася'}, opponent_memory=False)
         self.assertIsNone(bot.opponent_profile(state(seated=2, live=1)))
 
+    def test_both_entry_points_number_the_seats_the_same(self):
+        """Правило нумерации одно на всех: и наблюдатель, и выбор профиля — из opponents.
 
-class BotMemoryTest(unittest.TestCase):
-    """Игровой цикл: бот сам пишет профили и сам под них подстраивается."""
+        Раньше оно было выписано дважды (HandObserver и Bot.solo_opponent), и
+        разойтись им ничего не мешало — а разошлись бы, статистика писалась бы
+        одному оппоненту, а решение правилось бы по цифрам другого.
+        """
+        bot = self.bot(db=self.db())
+        for seat in (1, 2, 3):
+            with self.subTest(seat=seat):
+                frame = state(seated=3, live=3)
+                for i, s in enumerate(frame['seats'][1:], 1):
+                    s['in_hand'] = i == seat
+                obs = opponents.HandObserver(confirm=1)
+                obs.observe(frame)
+                self.assertEqual(obs.solo, seat, 'наблюдатель')
+                self.assertEqual(opponents.solo_seat(frame), seat, 'общая функция')
+                self.assertEqual(bot.solo_opponent(frame), opponents.seat_name(seat))
+
+
+class BotFixture(unittest.TestCase):
+    """Общая обвязка: бот на заглушке экрана и своей базе во временной папке."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='clubgg_mem_')
@@ -387,6 +415,10 @@ class BotMemoryTest(unittest.TestCase):
         for frame in frames:
             bot.observe(frame)
             bot.observe(frame)
+
+
+class BotMemoryTest(BotFixture):
+    """Игровой цикл: бот сам пишет профили и сам под них подстраивается."""
 
     def test_profiles_are_written_after_the_hand(self):
         bot = self.bot()
@@ -474,6 +506,78 @@ class BotMemoryTest(unittest.TestCase):
             self.assertIsNone(bot.observe(state('flop')))
         with open(bot.log_path, encoding='utf-8') as f:
             self.assertIn('кадр не учтён', f.read())
+
+
+class HandBoundaryTest(BotFixture):
+    """Своя граница раздачи: пустой стол между раздачами, а не смена карт.
+
+    Признаком новой раздачи была смена карманных карт. Две раздачи подряд с
+    одной парой (1 к 1326) шли за одну: raised_preflop оставался взведённым, а
+    с ним порог «перед нами ререйз» падал с three_bet_mult до 1.6 открытия — и
+    бот перефолдил весь диапазон колла против чужого обычного открытия.
+    """
+
+    @staticmethod
+    def empty():
+        """Кадр между раздачами: карт нет ни у героя, ни на столе."""
+        return {'hole': [], 'board': [], 'seats': []}
+
+    def blank_frames(self, bot, n=None):
+        n = Bot.HAND_OVER_FRAMES if n is None else n
+        for _ in range(n):
+            bot.track_hand(self.empty())
+
+    def test_an_empty_table_closes_the_hand(self):
+        bot = self.bot()
+        bot.raised_preflop, bot.last_hole = True, ['Ah', 'Kd']
+        self.blank_frames(bot)
+        self.assertFalse(bot.raised_preflop, 'свой рейз живёт одну раздачу')
+        self.assertIsNone(bot.last_hole, 'следующие карты — уже новая раздача')
+
+    def test_one_misread_frame_is_not_the_end_of_the_hand(self):
+        """Карты не прочитались на паре кадров — раздача не должна закрываться."""
+        bot = self.bot()
+        bot.raised_preflop, bot.last_hole = True, ['Ah', 'Kd']
+        self.blank_frames(bot, Bot.HAND_OVER_FRAMES - 1)
+        self.assertTrue(bot.raised_preflop)
+        bot.track_hand(state('preflop'))          # карты вернулись — счётчик с нуля
+        self.blank_frames(bot, Bot.HAND_OVER_FRAMES - 1)
+        self.assertTrue(bot.raised_preflop, 'та же раздача')
+
+    def test_a_board_that_disappeared_closes_the_hand(self):
+        """Доска была и пропала — раздачу сдали заново, даже если карты «видны»."""
+        bot = self.bot()
+        bot.raised_preflop = True
+        bot.track_hand(state('river'))
+        for _ in range(Bot.HAND_OVER_FRAMES):
+            bot.track_hand(state('preflop'))      # карты есть, а доски уже нет
+        self.assertFalse(bot.raised_preflop)
+
+    def test_the_same_frame_is_counted_once(self):
+        """run и step смотрят на один и тот же кадр — считать его дважды нельзя."""
+        bot = self.bot()
+        bot.raised_preflop = True
+        frame = self.empty()
+        for _ in range(Bot.HAND_OVER_FRAMES * 2):
+            bot.track_hand(frame)
+        self.assertTrue(bot.raised_preflop, 'кадр один, раздача не закрывалась')
+
+    def test_the_same_cards_twice_are_two_hands_in_the_stats(self):
+        """Наблюдателю граница нужна ровно так же: иначе две раздачи слипнутся в одну."""
+        bot = self.bot()
+        self.play(bot, [state('preflop'), state('flop')])
+        self.blank_frames(bot)
+        self.play(bot, [state('preflop'), state('flop')])
+        bot.summary()                             # закрыть последнюю раздачу
+        self.assertEqual(bot.players_db['Оппонент 1']['hands'], 2)
+
+    def test_a_broken_close_does_not_break_the_loop(self):
+        bot = self.bot()
+        with mock.patch.object(bot.observer, 'table_reset', side_effect=ValueError('кадр')):
+            self.blank_frames(bot)
+        self.assertFalse(bot.raised_preflop, 'состояние раздачи обнулено всё равно')
+        with open(bot.log_path, encoding='utf-8') as f:
+            self.assertIn('раздача не закрыта', f.read())
 
 
 if __name__ == '__main__':

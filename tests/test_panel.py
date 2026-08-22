@@ -291,6 +291,23 @@ class PanelTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0]['vpip'], 1.0)
         self.assertAlmostEqual(rows[0]['agg'], 2.0)
 
+    def test_opponents_block_marks_metrics_without_observations(self):
+        """Панель показывает, какие цифры бот уже применяет, а какие ещё нет."""
+        import opponents
+        import strategy
+        players = os.path.join(self.tmp, 'players.json')
+        db = opponents.Profiles(players)
+        db.db['Вася'] = dict(opponents.blank(opponents.NICK_NOTE), hands=25,
+                             vpip_hands=10, three_bet_spots=3, agg_bets=4, agg_calls=2)
+        db.save()
+        with mock.patch.object(self.panel.config, 'PLAYERS_FILE', players):
+            row = self.mgr.opponents()[0]
+        self.assertTrue(row['ready']['vpip'], '25 рук — VPIP уже считается')
+        for metric in ('pfr', 'three_bet', 'agg'):
+            with self.subTest(metric=metric):
+                self.assertFalse(row['ready'][metric])
+        self.assertEqual(sorted(row['ready']), sorted(strategy.PROFILE_MIN_HANDS))
+
     def test_opponents_block_survives_a_missing_file(self):
         with mock.patch.object(self.panel.config, 'PLAYERS_FILE',
                                os.path.join(self.tmp, 'нет.json')):

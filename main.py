@@ -119,6 +119,7 @@ class Bot:
     PRESET_FRAC_TOL = 0.2    # ближе этого к нужной доле банка — размер устраивает
     STACK_SANE_MULT = 10.0   # стек с экрана дальше 10x начального — не верим
     STACK_EPS = 0.05         # мельче — то же значение (не пишем файл и не логируем)
+    HAND_OVER_FRAMES = 3     # столько пустых кадров подряд = раздача закончилась
 
     def __init__(self, screen, dry_run=False, stack_bb=69.6, players_db=None,
                  tpl_dir=None, log_path=None, history_path=None, chart=None,
@@ -165,6 +166,9 @@ class Bot:
         self.hand_id = 0
         self.raised_preflop = False     # мы уже поднимали на этом префлопе
         self.last_hole = None
+        self._tracked = None            # кадр, по которому уже искали границу раздачи
+        self._empty_frames = 0          # сколько кадров подряд стол пуст (см. track_hand)
+        self._board_seen = False        # в этой раздаче доска уже открывалась
         self.last_action_ts = 0.0
         self.last_state = None
         self.stable = 0
@@ -280,21 +284,14 @@ class Bot:
     def solo_opponent(self, state):
         """Имя профиля ЕДИНСТВЕННОГО оппонента в раздаче (или None).
 
-        Место по кругу считается ровно так же, как в HandObserver: плашки без
-        героя по порядку, начиная с 1. Ник этого места (self.nicks) и есть имя
+        Место по кругу считает opponents.solo_seat — та же функция, по которой
+        нумерует места HandObserver. Ник этого места (self.nicks) и есть имя
         профиля; ников нет — падаем на «Оппонент N», как статистика и писалась.
         """
-        seats = (state or {}).get('seats') or []
-        live, i = [], 0
-        for s in seats:
-            if s.get('hero'):
-                continue
-            i += 1
-            if s.get('in_hand'):
-                live.append(i)
-        if len(live) != 1:
+        seat = opponents.solo_seat(state)
+        if seat is None:
             return None
-        return self.nicks.get(live[0]) or opponents.seat_name(live[0])
+        return self.nicks.get(seat) or opponents.seat_name(seat)
 
     def opponent_profile(self, state=None):
         """Профиль оппонента, ПРОТИВ КОТОРОГО идёт раздача, — по нему правится решение.
@@ -321,6 +318,58 @@ class Bot:
                   if isinstance(v, dict) and k != config.HERO_NAME
                   and not v.get('merged_into')]
         return others[0] if len(others) == 1 else None
+
+    # ---------- граница раздачи ----------
+    def track_hand(self, state):
+        """Следить по кадру за тем, закончилась ли раздача на столе.
+
+        Зовётся на КАЖДОМ кадре, в том числе когда ход не наш: раздача чаще
+        всего заканчивается как раз без нас.
+
+        Признак новой раздачи у бота свой, а не «сменились карманные карты».
+        По смене карт две раздачи подряд с одной и той же парой (1 к 1326)
+        прошли бы за одну: raised_preflop остался бы взведённым, порог «перед
+        нами ререйз» упал бы с three_bet_mult до RERAISE_OPEN_MULT открытий, и
+        весь диапазон колла улетел бы в фолд на чужом обычном открытии.
+
+        Раздача считается закрытой, когда стол обнулился: карманных карт нет
+        HAND_OVER_FRAMES кадров подряд либо доска открывалась и столько же
+        кадров пуста. Подтверждение кадрами обязательно — одиночный промах
+        распознавания посреди раздачи выглядит ровно так же.
+        """
+        if state is self._tracked:
+            return                    # тот же кадр: run и step смотрят на один и тот же
+        self._tracked = state
+        hole = [c for c in (state.get('hole') or []) if c]
+        board = [c for c in (state.get('board') or []) if c]
+        if len(board) >= 3:
+            self._board_seen = True
+        empty = len(hole) < 2 or (self._board_seen and not board)
+        self._empty_frames = self._empty_frames + 1 if empty else 0
+        if self._empty_frames >= self.HAND_OVER_FRAMES:
+            self.close_hand()
+
+    def close_hand(self):
+        """Раздача закончилась — обнулить ВСЁ её состояние (см. track_hand).
+
+        last_hole = None значит, что следующие карманные карты будут новой
+        раздачей, даже если придут те же самые: hand_id прибавится, стек и ники
+        перечитаются, raised_preflop начнётся с нуля.
+        """
+        self.last_hole = None
+        self.raised_preflop = False
+        self._bluff_key = self._bluff_last = None
+        self._board_seen = False
+        if not self.opponent_memory:
+            return
+        try:
+            # у наблюдателя раздача тоже открывается по смене карт — закрываем
+            # её здесь, иначе две одинаковые пары подряд слиплись бы в одну
+            finished = self.observer.table_reset()
+            if finished:
+                self.save_profiles(finished)
+        except Exception as e:                    # цикл важнее статистики
+            self.log(f'память оппонентов: раздача не закрыта ({type(e).__name__}: {e})')
 
     # ---------- память оппонентов ----------
     def observe(self, state):
@@ -789,6 +838,7 @@ class Bot:
                 return None
             state = ts.read_state(img, tpl_dir=self.tpl_dir)
         self.last_state = state
+        self.track_hand(state)       # не закончилась ли прошлая раздача
         self.observe(state)          # кадр в память оппонентов (в run — на каждом)
         if not state['my_turn']:
             self.stable = 0
@@ -800,7 +850,9 @@ class Bot:
             return None
 
         hole = [c for c in state['hole'] if c]
-        # новая раздача: карманные карты сменились
+        # Первый наш ход в новой раздаче: карты сменились ИЛИ прошлая раздача
+        # уже закрыта по кадрам (track_hand обнулил last_hole) — тогда те же
+        # самые карты второй раз подряд тоже считаются новой раздачей.
         if hole and hole != self.last_hole:
             self.hand_id += 1
             self.last_hole = hole
@@ -953,6 +1005,7 @@ class Bot:
                         continue
                     fails = 0
                     state = ts.read_state(img, tpl_dir=self.tpl_dir)
+                    self.track_hand(state)  # граница раздачи чаще всего проходит без нас
                     self.observe(state)     # оппоненты играют как раз не на нашем ходу
                     if not (state['my_turn'] and state['in_hand']):
                         opp_acted = True    # ход не наш: оппонент думает/сыграл

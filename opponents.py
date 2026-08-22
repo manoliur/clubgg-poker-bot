@@ -123,6 +123,34 @@ def player_name(seat, nick=None):
     return nick or seat_name(seat)
 
 
+def opponent_seats(state):
+    """Плашки оппонентов из кадра с номерами по кругу: [(номер, плашка), ...], с 1.
+
+    Единственное место, где живёт правило нумерации: по нему считают и
+    HandObserver (кому писать статистику), и Bot.solo_opponent (чей профиль
+    применять к решению). Правило было выписано в обоих местах отдельно, и
+    разойтись им ничего не мешало, а разошлись бы — статистика ушла бы соседу.
+
+    Пусто, когда плашки героя в кадре нет: круг мест отсчитывается от героя, без
+    него номер места ничего не значит.
+    """
+    seats = (state or {}).get('seats') or []
+    if not any(s.get('hero') for s in seats):
+        return []
+    return list(enumerate((s for s in seats if not s.get('hero')), 1))
+
+
+def live_seats(state):
+    """Номера мест оппонентов, у которых на этом кадре ещё есть карты."""
+    return [i for i, s in opponent_seats(state) if s.get('in_hand')]
+
+
+def solo_seat(state):
+    """Номер места ЕДИНСТВЕННОГО оппонента в раздаче. None — их не один."""
+    live = live_seats(state)
+    return live[0] if len(live) == 1 else None
+
+
 def blank(notes=''):
     p = {'first_seen': datetime.date.today().isoformat(), 'hands': 0,
          'vpip': 0.0, 'pfr': 0.0, 'three_bet': 0.0, 'agg': 0.0,
@@ -469,10 +497,15 @@ class Profiles:
         for name, p in self.db.items():
             if name == hero or not isinstance(p, dict) or p.get('merged_into'):
                 continue
+            # вместе с долями отдаём знаменатели: по ним видно, набралось ли на
+            # метрику наблюдений (strategy.metric_ready) — панель их различает
             out.append({'name': name, 'hands': int(p.get('hands') or 0),
                         'vpip': p.get('vpip') or 0.0, 'pfr': p.get('pfr') or 0.0,
                         'three_bet': p.get('three_bet') or 0.0,
-                        'agg': p.get('agg') or 0.0})
+                        'agg': p.get('agg') or 0.0,
+                        'three_bet_spots': int(p.get('three_bet_spots') or 0),
+                        'agg_bets': int(p.get('agg_bets') or 0),
+                        'agg_calls': int(p.get('agg_calls') or 0)})
         out.sort(key=lambda o: (-o['hands'], o['name']))
         return out
 
@@ -530,6 +563,16 @@ class HandObserver:
         self._pending = None
         self._pending_seen = 0
 
+    def table_reset(self):
+        """Стол обнулился (см. Bot.track_hand) — закрыть раздачу здесь и сейчас.
+
+        Своей границы раздачи у наблюдателя нет: он открывает новую по СМЕНЕ
+        карманных карт, а две раздачи подряд с одной и той же парой слились бы
+        в одну — вместе с hero_raised, из-за которого чужое открытие в
+        следующей раздаче записалось бы оппоненту как 3-бет.
+        """
+        return self.finish() if self.hole is not None else None
+
     def finish(self):
         """Закрыть раздачу: место -> наблюдения. None, если наблюдать было не за кем."""
         seen = {i: r for i, r in self.opp.items() if r['seen']}
@@ -571,15 +614,9 @@ class HandObserver:
 
     def _see_seats(self, state):
         """Отметить, кто сидит и у кого остались карты. Возвращает живые места."""
-        seats = state.get('seats') or []
-        if not any(s.get('hero') for s in seats):
-            return []            # круг мест не привязан к герою — считать нельзя
         street = state.get('street') or 'preflop'
-        live, i = [], 0
-        for s in seats:
-            if s.get('hero'):
-                continue
-            i += 1
+        live = []
+        for i, s in opponent_seats(state):    # пусто = круг мест не привязан к герою
             rec = self._slot(i)
             rec['seen'] = True
             if s.get('in_hand'):

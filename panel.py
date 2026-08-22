@@ -74,6 +74,11 @@ SLIDERS = [
     ('bet_strong', 'Размер: сильная', 0.3, 1.0, 0.05),
     ('bet_medium', 'Размер: средняя', 0.2, 0.9, 0.05),
     ('bet_draw', 'Размер: дро', 0.2, 0.9, 0.05),
+    # сколько наблюдений нужно метрике профиля, чтобы бот её применял
+    ('min_hands_vpip', 'Рук на VPIP', 5, 100, 5),
+    ('min_hands_pfr', 'Рук на PFR', 10, 200, 10),
+    ('min_hands_three_bet', 'Рук на 3-бет', 20, 400, 10),
+    ('min_hands_agg', 'Рук на агрессию', 20, 400, 10),
 ]
 SLIDER_KEYS = [s[0] for s in SLIDERS]
 FLAG_KEYS = [f[0] for f in FLAGS]
@@ -239,8 +244,18 @@ class BotManager:
 
     @staticmethod
     def opponents():
-        """Профили из players.json — блок «Оппоненты». Файл пишет бот."""
-        return opponents.Profiles(config.PLAYERS_FILE).opponents()
+        """Профили из players.json — блок «Оппоненты». Файл пишет бот.
+
+        К каждой метрике добавляется признак ready: набралось ли на неё
+        наблюдений (strategy.metric_ready). Метрику без него бот не применяет, и
+        в таблице она показана бледной — иначе «3-бет 0%» после сорока рук
+        читался бы как вывод, а это ещё не цифра.
+        """
+        rows = opponents.Profiles(config.PLAYERS_FILE).opponents()
+        for row in rows:
+            row['ready'] = {m: strategy.metric_ready(row, m)
+                            for m in strategy.PROFILE_MIN_HANDS}
+        return rows
 
     @staticmethod
     def styles():
@@ -413,6 +428,7 @@ PAGE = """<!DOCTYPE html>
  .opps th,.opps td{border:1px solid #2c3644;padding:2px 9px;text-align:right}
  .opps th{color:#9fb0c3;font-weight:normal}
  .opps th:first-child,.opps td:first-child{text-align:left}
+ .opps td.raw{color:#5b6a7d}
  .flags label{color:#e8e8e8;display:flex;gap:6px;align-items:center;cursor:pointer}
  .dirty{color:#ffd75e}
 </style></head><body><div class="wrap">
@@ -430,6 +446,10 @@ async function api(path, method, body){
 }
 function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 function pct(x){ return Math.round((x||0)*100)+'%'; }
+// метрика, по которой ещё мало наблюдений: бот её не применяет — и панель
+// показывает бледной, чтобы её не читали как вывод об оппоненте
+function raw(o, m){ return ((o.ready||{})[m]) ? '' :
+  ' class="raw" title="наблюдений мало — метрика не применяется"'; }
 async function refresh(){
   if (editing) return;       // иначе автообновление сотрёт несохранённые правки
   const data = await api('/api/devices');
@@ -466,8 +486,11 @@ async function refresh(){
    <div class="opps"><b>Оппоненты</b>${(d.opponents||[]).length ? `<table>
      <tr><th>Имя</th><th>Рук</th><th>VPIP</th><th>PFR</th><th>3-бет</th><th>Agg</th></tr>
      ${d.opponents.map(o => `<tr><td>${esc(o.name)}</td><td>${o.hands}</td>
-       <td>${pct(o.vpip)}</td><td>${pct(o.pfr)}</td><td>${pct(o.three_bet)}</td>
-       <td>${(o.agg||0).toFixed(1)}</td></tr>`).join('')}</table>`
+       <td${raw(o,'vpip')}>${pct(o.vpip)}</td><td${raw(o,'pfr')}>${pct(o.pfr)}</td>
+       <td${raw(o,'three_bet')}>${pct(o.three_bet)}</td>
+       <td${raw(o,'agg')}>${(o.agg||0).toFixed(1)}</td></tr>`).join('')}</table>
+     <div class="hint">Бледные цифры бот не применяет: наблюдений на метрику
+       ещё мало</div>`
      : ' <span class="hint">пока пусто — профили появятся после первых раздач</span>'}</div>
    <div class="row">
      <button class="go" data-a="start" ${d.running?'disabled':''}>▶ Старт</button>

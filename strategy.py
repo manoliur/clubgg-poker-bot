@@ -83,6 +83,16 @@ CBET_POT = 0.6              # ставка на велью, доля банка
 NUTS_POT = 0.75             # с натсами берём дороже: заряжаем дро и вторую руку
 SEMI_BLUFF_POT = 0.45       # полу-блеф с дро
 
+# Сколько раздач нужно метрике профиля, чтобы ей верить. Пороги разные, потому
+# что метрики копятся с разной скоростью: VPIP виден в КАЖДОЙ раздаче (оппонент
+# либо доехал до флопа, либо нет), PFR — только когда кто-то поднял, а 3-бет и
+# агрессия считаются по спотам, которых за сотню рук набирается меньше десятка
+# (живой профиль HerGlinoMes: 103 руки, 9 спотов на 3-бет). Общий порог 20 рук
+# на все метрики означал бы, что 3-бет применяется по девяти наблюдениям.
+MIN_PROFILE_HANDS = 20      # VPIP
+MIN_PROFILE_PFR = 40        # PFR
+MIN_PROFILE_STATS = 80      # 3-бет и агрессия
+
 # Настройки розыгрыша (их переопределяет секция "postflop" чарта, а поверх —
 # стиль и переключатели устройства из devices.json, см. device_settings).
 DEFAULT_SETTINGS = {
@@ -124,6 +134,11 @@ DEFAULT_SETTINGS = {
     'blocker_bluff_every': 3,     # не чаще одной такой ситуации из трёх
     # --- игра без позиции ---
     'position_aware': False,
+    # --- сколько рук нужно метрике профиля, чтобы её применять (metric_ready) ---
+    'min_hands_vpip': MIN_PROFILE_HANDS,
+    'min_hands_pfr': MIN_PROFILE_PFR,
+    'min_hands_three_bet': MIN_PROFILE_STATS,
+    'min_hands_agg': MIN_PROFILE_STATS,
 }
 
 # Пресеты стиля: готовые наборы настроек под кнопку в панели. Ползунки агрессии
@@ -178,7 +193,23 @@ DEVICE_SETTING_KEYS = tuple(k for k in DEFAULT_SETTINGS if k != 'aggression')
 SHOWDOWN_EQUITY = {'nuts': 0.85, 'strong': 0.65, 'medium': 0.45, 'weak': 0.30}
 CALL_MARGIN = 0.05          # запас: коллим, когда цена заметно ниже эквити
 BLIND_PRICE = 0.33          # цена колла, когда чисел банка нет (ставка ~полбанка)
-MIN_PROFILE_HANDS = 20      # короче — цифры профиля ещё шум (см. adjust_for_opponent)
+
+# Метрика профиля -> ключ настройки с её порогом по рукам (см. metric_ready).
+PROFILE_MIN_HANDS = {'vpip': 'min_hands_vpip', 'pfr': 'min_hands_pfr',
+                     'three_bet': 'min_hands_three_bet', 'agg': 'min_hands_agg'}
+# И её знаменатель: пока он пуст, сама доля ничего не значит. «3-бет 0%» при
+# нуле спотов — это не пассивный оппонент, а отсутствие наблюдений.
+PROFILE_DENOM = {'vpip': ('hands',), 'pfr': ('hands',),
+                 'three_bet': ('three_bet_spots',), 'agg': ('agg_bets', 'agg_calls')}
+
+# Блайнды за столом (ББ) — по ним считается, сколько в банке чужих денег.
+BLINDS_BB = 1.5
+# Сколько из них наши — по позиции героя (в хедз-апе позиции те же SB/BB).
+HERO_BLIND_BB = {'SB': 0.5, 'BB': 1.0}
+# Ставка от стольких открытий — уже поставлена ПОВЕРХ чужих денег, а не открытие.
+RERAISE_OPEN_MULT = 1.6
+# Запас к оценке лимпов (ББ): чужой блайнд и лимпер, успевший сбросить карты.
+LIMP_SLACK_BB = 1.5
 
 
 # --------------------------------------------------------------------------
@@ -654,6 +685,60 @@ def _raise_pot(reason, pot_bb, fraction):
 # --------------------------------------------------------------------------
 # префлоп
 # --------------------------------------------------------------------------
+def preflop_dead_bb(pot_bb, to_call_bb, position=None):
+    """Чужие деньги, лежащие в банке ПОД текущей ставкой (ББ).
+
+    Чужих кнопок бот не видит, чужих ставок по отдельности — тоже: в кадре есть
+    только банк и сумма колла. Но из них считается, сколько вложили ДО этой
+    ставки —
+
+        банк = блайнды + все вложения, текущая ставка = колл + наш блайнд,
+
+    и всё, что в банке сверх блайндов и текущей ставки, положено до неё:
+    лимперами или предыдущим рейзером с его коллерами.
+
+    None — банка в кадре нет (эталонов цифр может не быть), считать не из чего.
+    """
+    if pot_bb is None or to_call_bb is None:
+        return None
+    hero_in = HERO_BLIND_BB.get(position or '', 0.0)
+    return max(0.0, round(pot_bb - BLINDS_BB - (to_call_bb + hero_in), 1))
+
+
+def preflop_investors(pot_bb, to_call_bb, position=None):
+    """Сколько вложений сделано на префлопе до нашего хода (ставка плюс лимпы).
+
+    1 — перед нами голое открытие; 2 и больше — под ставкой лежат чужие деньги.
+    Лимп стоит ББ, поэтому лишние деньги в банке и есть счётчик вложивших.
+    """
+    dead = preflop_dead_bb(pot_bb, to_call_bb, position)
+    return None if dead is None else 1 + min(5, int(round(dead)))
+
+
+def is_squeeze(pot_bb, to_call_bb, position=None, live_players=None):
+    """Поставлена ли ставка ПОВЕРХ чужого рейза: сквиз или холодный 3-бет.
+
+    Само число вложивших ререйз от изо-рейза не отличает: и «2 лимпа + рейз до
+    5ББ», и «открытие + коллер + сквиз» — это 2-3 вложения, но первое ещё
+    открытие (см. BigOpenTest), а второе уже ререйз. Отличает СКОЛЬКО вложено:
+    лимп стоит ровно ББ, поэтому если под ставкой лежит больше, чем могли
+    налимпить оставшиеся в раздаче, — значит до неё уже поднимали, и наша рука
+    играет против ререйзного диапазона.
+
+    live_players — сколько игроков ещё в раздаче (герой в том числе). Без него
+    верхней границы лимпов нет и решать не из чего — False. В хедз-апе — тоже
+    False: класть деньги под чужую ставку там просто некому, а банк в кадре
+    читается с ошибками, и лишний ББ не должен превращать открытие в 3-бет.
+    """
+    dead = preflop_dead_bb(pot_bb, to_call_bb, position)
+    if dead is None or not live_players or int(live_players) < 3:
+        return False
+    # оппоненты в раздаче минус тот, кто и поставил, по ББ на лимп; запас 1.5ББ —
+    # на чужой блайнд и на лимпера, который уже успел сбросить карты
+    limps = max(0, int(live_players) - 2) + LIMP_SLACK_BB
+    return dead > limps
+
+
 def _versus(no_raise, to_call_bb, stack_bb):
     """Как назвать ставку, на которую отвечаем: алл-ин или просто крупная."""
     if no_raise:
@@ -663,7 +748,7 @@ def _versus(no_raise, to_call_bb, stack_bb):
 
 
 def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_bb, chart=None,
-                   no_raise=False, hero_raised=False):
+                   no_raise=False, hero_raised=False, live_players=None):
     """Решение на префлопе. no_raise — рейз недоступен (оппонент в алл-ине).
 
     Когда рейзить нечем или ставка перед нами размером с полстека, чарты 3-бета
@@ -671,6 +756,9 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
 
     hero_raised — мы на этом префлопе уже поднимали. По этому признаку ставка
     перед нами отличается от обычного открытия: см. is_3bet ниже.
+
+    players — сколько СИДИТ за столом (по ним берутся диапазоны), live_players —
+    сколько ещё в раздаче (по ним видно, сколько денег под ставкой чужие).
     """
     chart = chart or _ACTIVE
     st = chart.settings
@@ -717,15 +805,33 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
     # карманных тузов. Против 3-бета+ играем только монстрами (4-бет QQ+/AK) и
     # премиумом (колл JJ+/AQs+), остальное — фолд.
     #
-    # Отличить ререйз от обычного открытия можно только по нашему же прошлому
-    # ходу: если мы уже поднимали, любая доплата от 1.6 открытий — это ставка
-    # ПОВЕРХ нашего рейза. А пока мы не поднимали, столько стоит и обычное
-    # открытие: на живых столах открывают и в 4.5-5ББ, и по порогу 1.6 бот
-    # пасовал TT, 99, AJo, KQs — весь диапазон колла. Без своего рейза порогом
-    # служит размер НАСТОЯЩЕГО 3-бета (открытие x three_bet_mult).
+    # Ставка «поверх» видна по двум признакам. Первый — наш собственный прошлый
+    # ход: если мы уже поднимали, любая доплата от RERAISE_OPEN_MULT открытий —
+    # это ставка ПОВЕРХ нашего рейза. Второй — деньги под ставкой (is_squeeze):
+    # сквиз и холодный 3-бет тоже поставлены поверх, хотя мы и не поднимали, и
+    # по одному лишь размеру не отличались от крупного открытия — «открытие +
+    # коллер + сквиз до 7ББ» проходил как открытие и получал колл премиумом.
+    #
+    # Когда же под ставкой одни лимпы и мы не поднимали, столько стоит и обычный
+    # изо-рейз: на живых столах открывают и в 4.5-5ББ, и по порогу 1.6 бот
+    # пасовал TT, 99, AJo, KQs — весь диапазон колла. Тогда порогом служит
+    # размер НАСТОЯЩЕГО 3-бета (открытие x three_bet_mult).
     open_bb = st.get('open_size_bb') or 2.5
+    over = hero_raised or is_squeeze(pot_bb, to_call_bb, position, live_players)
     is_3bet = (to_call_bb is not None
-               and to_call_bb > open_bb * (1.6 if hero_raised else mult))
+               and to_call_bb > open_bb * (RERAISE_OPEN_MULT if over else mult))
+    # Короткий стек против ререйза: пуш-диапазон здесь не годится — он собран
+    # под борьбу за блайнды с ОТКРЫТИЕМ, а не против руки, которая уже
+    # поставила поверх. Без этого AQ уходила в алл-ин против 4-бета (QQ+/AK).
+    if is_3bet and short and not in_range(hole, chart.four_bet):
+        if not premium:
+            return _d('fold', f'{code}: фолд против 3-бета+{note}'
+                      + (f' — {_odds_note(price, 0.25)}' if price is not None else ''))
+        if no_raise:
+            return _d('call', f'{code}: колл 3-бета+ с премиум-рукой '
+                              f'{_versus(True, to_call_bb, stack_bb)}{note}')
+        return _d('raise', f'{code}: премиум против 3-бета+ — алл-ин {stack_bb:.0f}ББ{note}',
+                  stack_bb, pot_frac=1.0)
     if not no_raise and not (big and not premium):
         if in_range(hole, chart.four_bet):
             if short:
@@ -946,17 +1052,39 @@ def _bet_size(pot_bb, fraction):
 # --------------------------------------------------------------------------
 # адаптация под оппонента и общий вход
 # --------------------------------------------------------------------------
-def adjust_for_opponent(decision, profile, made):
+def metric_ready(profile, metric, settings=None):
+    """Набралось ли на эту метрику профиля столько наблюдений, чтобы ей верить.
+
+    Порог у каждой метрики свой (PROFILE_MIN_HANDS): VPIP осмысленен уже через
+    пару десятков раздач, PFR — вдвое позже, а 3-бет и агрессия копятся спотами
+    и требуют сотни рук. Кроме рук проверяется знаменатель самой метрики
+    (PROFILE_DENOM): «3-бет 0%» при нуле спотов — это не пассивный оппонент, а
+    отсутствие наблюдений, и подстраиваться под такой ноль нельзя.
+    """
+    if not isinstance(profile, dict):
+        return False
+    key = PROFILE_MIN_HANDS.get(metric)
+    if key is None:
+        return False
+    st = settings if settings is not None else DEFAULT_SETTINGS
+    if int(profile.get('hands') or 0) < int(st.get(key, DEFAULT_SETTINGS[key])):
+        return False
+    return any(int(profile.get(k) or 0) for k in PROFILE_DENOM[metric])
+
+
+def adjust_for_opponent(decision, profile, made, settings=None):
     """Правки по players.json: против лузово-пассивных не блефуем, против тайтовых — чаще.
 
-    Профиль моложе MIN_PROFILE_HANDS не применяется: после одной раздачи, в
-    которой оппонент просто заплатил блайнд, VPIP у него 100%, и бот перестал бы
-    блефовать против кого угодно с первой же руки.
+    Каждая метрика применяется отдельно и только по своему порогу (metric_ready):
+    после одной раздачи, в которой оппонент просто заплатил блайнд, VPIP у него
+    100%, и бот перестал бы блефовать против кого угодно с первой же руки; а
+    агрессии на те же 20 рук набирается пара наблюдений, и верить ей рано даже
+    тогда, когда VPIP уже честный.
     """
-    if not profile or int(profile.get('hands') or 0) < MIN_PROFILE_HANDS:
+    if not profile:
         return decision
-    vpip = profile.get('vpip') or 0
-    agg = profile.get('agg') or 0
+    vpip = (profile.get('vpip') or 0) if metric_ready(profile, 'vpip', settings) else 0
+    agg = (profile.get('agg') or 0) if metric_ready(profile, 'agg', settings) else 0
     if decision['action'] == 'raise' and made in ('air', 'draw') and vpip > 0.40:
         return _d('check', decision['reason'] + ' -> оппонент лузовый, блеф не проходит',
                   None)
@@ -1001,7 +1129,8 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
         if street == 'preflop' or not board:
             decision = decide_preflop(hole, position, seated, has_bet, to_call, pot,
                                       stack_bb, chart, no_raise=no_raise,
-                                      hero_raised=bool(state.get('hero_raised')))
+                                      hero_raised=bool(state.get('hero_raised')),
+                                      live_players=players)
             made = 'preflop'
         else:
             # first_to_act == 'me' — говорим первыми, то есть играем без позиции
@@ -1013,7 +1142,7 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
     except (he.BadCard, ValueError) as e:
         return _d('check' if not has_bet else 'fold', f'ошибка разбора карт: {e}')
 
-    decision = adjust_for_opponent(decision, profile, made)
+    decision = adjust_for_opponent(decision, profile, made, chart.settings)
     # чек невозможен, когда перед нами ставка, и наоборот
     if has_bet and decision['action'] == 'check':
         decision = _d('fold', decision['reason'] + ' (чек невозможен — есть ставка)')

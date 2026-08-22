@@ -328,6 +328,137 @@ class BigOpenTest(unittest.TestCase):
         self.assertEqual(d['action'], 'fold', d['reason'])
         self.assertIn('4-бета', d['reason'])
 
+    def test_a_squeeze_over_a_raise_is_a_reraise(self):
+        """Открытие 2.5ББ + коллер + сквиз до 7ББ.
+
+        По размеру это «крупное открытие» (меньше трёх открытий), и раньше TT
+        отвечала ему коллом. Но под ставкой лежит 5ББ — столько лимпами не
+        набирается, значит до неё уже поднимали, и это ререйз.
+        """
+        d = self.hand(['Th', 'Td'], 7.0, pot_bb=13.5, players=5)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('против 3-бета+', d['reason'])
+
+    def test_an_iso_raise_over_limps_is_still_an_open(self):
+        """Два лимпа и рейз до 5.5ББ — это изо-рейз: диапазон колла остаётся."""
+        d = self.hand(['Th', 'Td'], 5.5, pot_bb=9.5, players=5)
+        self.assertNotIn('против 3-бета+', d['reason'])
+        self.assertIn(d['action'], ('call', 'raise'), d['reason'])
+
+
+class PreflopMoneyTest(unittest.TestCase):
+    """Что бот вычитает из банка: сколько вложено до нашего хода и кем."""
+
+    def test_investors_count_the_limps_under_the_bet(self):
+        self.assertEqual(st.preflop_investors(4.0, 2.5, 'BTN'), 1)   # голое открытие
+        self.assertEqual(st.preflop_investors(9.5, 6.0, 'BTN'), 3)   # два лимпа и рейз
+        # свой блайнд лежит в том же банке и вложением соседей не считается
+        self.assertEqual(st.preflop_investors(9.5, 5.0, 'BB'), 3)
+
+    def test_without_the_pot_there_is_nothing_to_count(self):
+        self.assertIsNone(st.preflop_investors(None, 5.0, 'BTN'))
+        self.assertIsNone(st.preflop_investors(9.5, None, 'BTN'))
+
+    def test_a_squeeze_needs_more_money_than_limps_could_be(self):
+        # два лимпа под ставкой (2.5ББ) — столько могли налимпить и вчетвером
+        self.assertFalse(st.is_squeeze(9.5, 5.5, 'BTN', live_players=5))
+        # 5ББ под ставкой при троих оппонентах лимпами уже не объяснить
+        self.assertTrue(st.is_squeeze(13.5, 7.0, 'BTN', live_players=5))
+
+    def test_a_squeeze_is_impossible_when_there_is_nobody_to_squeeze(self):
+        """Хедз-ап и кадры без чисел: класть деньги под чужую ставку некому."""
+        self.assertFalse(st.is_squeeze(13.5, 7.0, 'BTN', live_players=2))
+        self.assertFalse(st.is_squeeze(13.5, 7.0, 'BTN', live_players=None))
+        self.assertFalse(st.is_squeeze(None, 7.0, 'BTN', live_players=5))
+
+
+class ShortStackReraiseTest(unittest.TestCase):
+    """Короткий стек пушит по своим диапазонам — но только против ОТКРЫТИЯ.
+
+    push/fold не смотрел, что перед ним ставка поверх: AQ уходила в алл-ин
+    против 4-бета, у которого диапазон QQ+/AK.
+    """
+
+    STACK = 25.0
+
+    def hand(self, hole, to_call, pot_bb=20.0, **kw):
+        base = {'hole': hole, 'position': 'BTN', 'players': 2, 'players_seated': 2,
+                'has_bet': True, 'to_call_bb': to_call, 'pot_bb': pot_bb,
+                'hero_raised': True}
+        base.update(kw)
+        return st.decide(state(**base), stack_bb=self.STACK)
+
+    def test_a_reraise_folds_out_everything_but_the_monsters(self):
+        for hole in (['Ah', 'Qd'], ['Th', 'Td'], ['Ah', 'Js'], ['Kh', 'Qh']):
+            with self.subTest(hole=hole):
+                d = self.hand(hole, 10.0)
+                self.assertEqual(d['action'], 'fold', d['reason'])
+                self.assertIn('против 3-бета+', d['reason'])
+
+    def test_monsters_and_premium_still_push(self):
+        for hole in (['Ah', 'Kd'], ['Qh', 'Qd'], ['Jh', 'Jd'], ['Ah', 'Qh']):
+            with self.subTest(hole=hole):
+                d = self.hand(hole, 10.0)
+                self.assertEqual(d['action'], 'raise', d['reason'])
+                self.assertEqual(d['amount_bb'], self.STACK, d['reason'])
+
+    def test_against_an_open_the_push_range_is_unchanged(self):
+        """Перед нами не ререйз — короткий стек пушит как раньше."""
+        d = self.hand(['Th', 'Td'], 2.5, pot_bb=4.0, hero_raised=False)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertEqual(d['amount_bb'], self.STACK, d['reason'])
+
+    def test_without_a_bet_the_push_range_is_unchanged(self):
+        d = self.hand(['Ah', 'Td'], None, pot_bb=1.5, has_bet=False, hero_raised=False)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertIn('вместо рейза', d['reason'])
+
+
+class ProfileThresholdTest(unittest.TestCase):
+    """У каждой метрики профиля свой порог: VPIP копится быстрее агрессии."""
+
+    @staticmethod
+    def prof(hands, **kw):
+        p = {'hands': hands, 'vpip': 0.5, 'pfr': 0.2, 'three_bet': 0.1, 'agg': 3.0,
+             'three_bet_spots': 8, 'agg_bets': 12, 'agg_calls': 4}
+        p.update(kw)
+        return p
+
+    def test_a_young_profile_is_trusted_metric_by_metric(self):
+        young = self.prof(25)
+        self.assertTrue(st.metric_ready(young, 'vpip'), 'VPIP считается каждую раздачу')
+        for metric in ('pfr', 'three_bet', 'agg'):
+            with self.subTest(metric=metric):
+                self.assertFalse(st.metric_ready(young, metric))
+
+    def test_a_grown_profile_is_trusted_whole(self):
+        grown = self.prof(85)
+        for metric in st.PROFILE_MIN_HANDS:
+            with self.subTest(metric=metric):
+                self.assertTrue(st.metric_ready(grown, metric))
+
+    def test_an_empty_denominator_is_not_a_zero(self):
+        """«3-бет 0%» при нуле спотов — это не пассивный оппонент, а нет наблюдений."""
+        self.assertFalse(st.metric_ready(self.prof(85, three_bet_spots=0), 'three_bet'))
+        self.assertFalse(st.metric_ready(self.prof(85, agg_bets=0, agg_calls=0), 'agg'))
+
+    def test_the_thresholds_come_from_the_settings(self):
+        loose = dict(st.DEFAULT_SETTINGS, min_hands_agg=20)
+        self.assertFalse(st.metric_ready(self.prof(25), 'agg'))
+        self.assertTrue(st.metric_ready(self.prof(25), 'agg', loose))
+
+    def test_aggression_waits_for_its_own_threshold(self):
+        """Тот же профиль: VPIP по нему уже работает, а агрессия ещё нет."""
+        fold = st._d('fold', 'средняя рука дороговата')
+        young = st.adjust_for_opponent(fold, self.prof(30), 'medium')
+        self.assertEqual(young['action'], 'fold', 'на 30 руках агрессии ещё не верим')
+        grown = st.adjust_for_opponent(fold, self.prof(85), 'medium')
+        self.assertEqual(grown['action'], 'call', grown['reason'])
+
+    def test_a_profile_without_counters_is_not_trusted(self):
+        self.assertFalse(st.metric_ready(None, 'vpip'))
+        self.assertFalse(st.metric_ready({'hands': 500}, 'выдуманная метрика'))
+
 
 class PotOddsTest(unittest.TestCase):
     """Живая раздача 19.08 15:49 #21: 6s6c на 2s 8s Qs 4s.

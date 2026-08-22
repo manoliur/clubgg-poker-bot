@@ -9,6 +9,7 @@ debug/
 shots_audit/
 shots_digits/
 devices.json
+players.json
 logs/
 shots_stack/
 _probe*.py
