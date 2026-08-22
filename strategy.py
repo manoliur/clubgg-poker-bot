@@ -925,122 +925,193 @@ def _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, player
     Тогда сильная рука коллит вместо рейза, а полу-блеф отменяется: блефовать
     коллом нельзя, и решение остаётся за пот-оддсами.
     """
-    st = chart.settings
-    cls = he.hand_class(hole, board)
-    made, outs, draws = cls['made'], cls['outs'], cls['draws']
-    name = cls['name'] or '?'
-    if cls['made_note']:
-        name = f'{name} ({cls["made_note"]})'
-    price = pot_odds(to_call_bb, pot_bb)
-    showdown = SHOWDOWN_EQUITY.get(made, 0.0)
-    # Колл размером с полстека и больше — фактически алл-ин: ставок дальше не
-    # будет, значит дро увидит ОБЕ карты (правило 4x) и добирать нечего.
-    all_in = bool(no_raise or (to_call_bb and stack_bb
-                               and to_call_bb >= st['all_in_frac'] * stack_bb))
-    hu = players is not None and players <= 2
-    semi = chart.bet_frac('draw', street, multiway=multiway, short=short)
-    # Цена колла: в мультипоте нужны чёткие пот-оддсы, с коротким стеком —
-    # наоборот шире (ставок дальше почти не будет, дро увидит обе карты).
-    price_mult = 1.0
-    if multiway and street in ('turn', 'river'):
-        # на флопе дро в мультипоте окупается добором (играют трое), а вот на
-        # терне и ривере против нескольких ставок нужны чёткие пот-оддсы
-        price_mult *= st['multiway_price_mult']
-    if short:
-        price_mult *= st['short_stack_price_mult']
-    # Флеш/стрит/фулл: рука сильная по номиналу, но её ранг уже учтён в made —
-    # младшим флешем банк не растят, а против крупной ставки считают шансы.
-    big_made = cls['category'] is not None and cls['category'] >= he.STRAIGHT
+    spot = Spot(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
+                chart, no_raise, multiway, short, oop, bluff_ok)
+    return _answer_bet(spot) if has_bet else _lead(spot)
 
-    if has_bet:
-        if big_made and made in ('medium', 'weak'):
-            # 19.08 15:49 #21: флеш с шестёркой отвечал коллом на алл-ин как натс.
-            # Против алл-ина нас бьёт любая старшая карта масти — решает цена.
-            if (price if price is not None else BLIND_PRICE) < (showdown - CALL_MARGIN) * price_mult:
-                return _d('call', f'{name}: колл — {_odds_note(price, showdown)}')
-            return _d('fold', f'{name}: фолд — {_odds_note(price, showdown)}')
-        if made in ('nuts', 'strong'):
-            if no_raise:
-                return _d('call', f'{name}: колл против алл-ина — '
-                                  f'{_odds_note(price, showdown)} (рейз недоступен)')
-            # при bet_sizing рейз натсом крупнее, без него — как раньше, cbet*1.5
-            kind = made if st['bet_sizing'] else 'strong'
-            return _raise_pot(f'{name}: рейз на велью', pot_bb,
-                              chart.bet_frac(kind, street, multiway=multiway, short=short,
-                                             mult=1.5))
-        if made == 'medium':
-            cap = st['medium_max_price'] * price_mult
-            if price is not None and price > cap:
-                return _d('fold', f'{name}: средняя рука, {_odds_note(price, showdown)} — фолд')
-            return _d('call', f'{name}: колл со средней рукой, {_odds_note(price, showdown)}')
-        if made == 'draw' or draws:
-            if price is None:
-                # чисел нет: считаем ставку полубанком и рассчитываем дойти до ривера
-                blind_eq = he.equity_from_outs(outs, street)
-                return (_d('call', f'дро {draws}, {outs} аутов (~{blind_eq:.0%}) — колл по аутам')
-                        if blind_eq >= st['draw_min_equity'] / price_mult
-                        else _d('fold', f'дро {draws}: {outs} аутов мало'))
-            # На флопе колл покупает ОДНУ карту, а не две: на терне за вторую
-            # придётся заплатить снова. Правило 4x тут завышало эквити почти
-            # вдвое (флеш-дро «36%» против цены 33% — на деле 19%). Недобор
-            # закрывают неявные пот-оддсы: когда дро заходит, оппонент доплачивает.
-            one_card = street == 'flop' and not all_in
-            equity = he.equity_from_outs(outs, 'turn' if one_card else street)
-            eff = price if all_in else implied_price(to_call_bb, pot_bb, stack_bb,
-                                                     st['implied_pot_mult'])
-            eff = price if eff is None else eff
-            note = '' if eff == price else f' (с имплайд-оддсами, чистая цена {price:.0%})'
-            need = eff / price_mult
-            if equity > need:
-                return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > '
-                                  f'цены {need:.0%}{note}')
-            if street == 'flop' and 'flush' in draws and hu and not no_raise:
-                return _raise_pot(f'сильное дро {draws}: полу-блеф', pot_bb, semi)
-            return _d('fold', f'дро {draws}: {equity:.0%} < цены {need:.0%}{note}')
-        if price is not None and price < st['cheap_price'] * price_mult and street != 'river':
-            return _d('call', f'{name}: дёшево ({price:.0%}) — смотрим следующую карту')
-        return _d('fold', f'{name}: нечем продолжать')
 
-    # нам чекнули / мы первые
-    if no_raise:
+# --------------------------------------------------------------------------
+# матрица постфлопа
+# --------------------------------------------------------------------------
+# Решение после флопа — функция пяти вещей: СИЛА РУКИ (made + класс комбинации),
+# ОПАСНОСТЬ ДОСКИ, АКТИВНОСТЬ ОППОНЕНТА (профиль и его линия в этой раздаче),
+# ЧИСЛО ИГРОКОВ и УЛИЦА. Раньше все пять читались вперемешку по ходу розыгрыша,
+# и каждое новое правило дописывалось очередным `if` в середину. Теперь они
+# считаются один раз в Spot, а сама матрица — две функции ниже: строка «против
+# ставки» (_answer_bet) и строка «нам чекнули / мы первые» (_lead). Порядок
+# проверок внутри них — тот же, что был, поведение не менялось.
+class Spot:
+    """Ситуация после флопа: всё, от чего зависит решение, посчитанное один раз.
+
+    Считается по одному разу на решение и дальше только читается — поэтому
+    матрица не пересчитывает силу руки и опасность доски в каждой ветке.
+    """
+
+    __slots__ = ('chart', 'st', 'hole', 'board', 'street', 'has_bet', 'to_call_bb',
+                 'pot_bb', 'stack_bb', 'players', 'no_raise', 'multiway', 'short',
+                 'oop', 'bluff_ok', 'hu', 'cls', 'made', 'name', 'outs', 'draws',
+                 'category', 'big_made', 'price', 'price_mult', 'showdown',
+                 'all_in', 'semi')
+
+    def __init__(self, hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb,
+                 players, chart, no_raise, multiway, short, oop, bluff_ok):
+        st = chart.settings
+        self.chart, self.st = chart, st
+        self.hole, self.board, self.street = hole, board, street
+        self.has_bet, self.to_call_bb, self.pot_bb = has_bet, to_call_bb, pot_bb
+        self.stack_bb, self.players = stack_bb, players
+        self.no_raise, self.multiway, self.short = no_raise, multiway, short
+        self.oop, self.bluff_ok = oop, bluff_ok
+        self.hu = players is not None and players <= 2
+
+        # --- сила руки ---
+        cls = he.hand_class(hole, board)
+        self.cls = cls
+        self.made, self.outs, self.draws = cls['made'], cls['outs'], cls['draws']
+        self.category = cls['category']
+        name = cls['name'] or '?'
+        if cls['made_note']:
+            name = f'{name} ({cls["made_note"]})'
+        self.name = name
+        # Флеш/стрит/фулл: рука сильная по номиналу, но её ранг уже учтён в made —
+        # младшим флешем банк не растят, а против крупной ставки считают шансы.
+        self.big_made = cls['category'] is not None and cls['category'] >= he.STRAIGHT
+        self.showdown = SHOWDOWN_EQUITY.get(cls['made'], 0.0)
+
+        # --- цена ---
+        self.price = pot_odds(to_call_bb, pot_bb)
+        # Колл размером с полстека и больше — фактически алл-ин: ставок дальше не
+        # будет, значит дро увидит ОБЕ карты (правило 4x) и добирать нечего.
+        self.all_in = bool(no_raise or (to_call_bb and stack_bb
+                                        and to_call_bb >= st['all_in_frac'] * stack_bb))
+        # Цена колла: в мультипоте нужны чёткие пот-оддсы, с коротким стеком —
+        # наоборот шире (ставок дальше почти не будет, дро увидит обе карты).
+        price_mult = 1.0
+        if multiway and street in ('turn', 'river'):
+            # на флопе дро в мультипоте окупается добором (играют трое), а вот на
+            # терне и ривере против нескольких ставок нужны чёткие пот-оддсы
+            price_mult *= st['multiway_price_mult']
+        if short:
+            price_mult *= st['short_stack_price_mult']
+        self.price_mult = price_mult
+        self.semi = chart.bet_frac('draw', street, multiway=multiway, short=short)
+
+    def bet_frac(self, kind, mult=1.0, short=None):
+        """Доля банка для ставки этой рукой — с режимами ситуации (см. Chart.bet_frac)."""
+        return self.chart.bet_frac(kind, self.street, multiway=self.multiway,
+                                   short=self.short if short is None else short,
+                                   mult=mult)
+
+    def odds(self, equity=None):
+        return _odds_note(self.price, self.showdown if equity is None else equity)
+
+
+def _answer_bet(spot):
+    """Строка матрицы «перед нами ставка»: колл, фолд или рейз."""
+    st, name, made, price = spot.st, spot.name, spot.made, spot.price
+    if spot.big_made and made in ('medium', 'weak'):
+        # 19.08 15:49 #21: флеш с шестёркой отвечал коллом на алл-ин как натс.
+        # Против алл-ина нас бьёт любая старшая карта масти — решает цена.
+        if ((price if price is not None else BLIND_PRICE)
+                < (spot.showdown - CALL_MARGIN) * spot.price_mult):
+            return _d('call', f'{name}: колл — {spot.odds()}')
+        return _d('fold', f'{name}: фолд — {spot.odds()}')
+    if made in ('nuts', 'strong'):
+        if spot.no_raise:
+            return _d('call', f'{name}: колл против алл-ина — '
+                              f'{spot.odds()} (рейз недоступен)')
+        # при bet_sizing рейз натсом крупнее, без него — как раньше, cbet*1.5
+        kind = made if st['bet_sizing'] else 'strong'
+        return _raise_pot(f'{name}: рейз на велью', spot.pot_bb, spot.bet_frac(kind, mult=1.5))
+    if made == 'medium':
+        cap = st['medium_max_price'] * spot.price_mult
+        if price is not None and price > cap:
+            return _d('fold', f'{name}: средняя рука, {spot.odds()} — фолд')
+        return _d('call', f'{name}: колл со средней рукой, {spot.odds()}')
+    if made == 'draw' or spot.draws:
+        return _answer_bet_draw(spot)
+    if (price is not None and price < st['cheap_price'] * spot.price_mult
+            and spot.street != 'river'):
+        return _d('call', f'{name}: дёшево ({price:.0%}) — смотрим следующую карту')
+    return _d('fold', f'{name}: нечем продолжать')
+
+
+def _answer_bet_draw(spot):
+    """Та же строка матрицы, клетка «дро»: считаем ауты против цены."""
+    st, draws, outs, price = spot.st, spot.draws, spot.outs, spot.price
+    street = spot.street
+    if price is None:
+        # чисел нет: считаем ставку полубанком и рассчитываем дойти до ривера
+        blind_eq = he.equity_from_outs(outs, street)
+        return (_d('call', f'дро {draws}, {outs} аутов (~{blind_eq:.0%}) — колл по аутам')
+                if blind_eq >= st['draw_min_equity'] / spot.price_mult
+                else _d('fold', f'дро {draws}: {outs} аутов мало'))
+    # На флопе колл покупает ОДНУ карту, а не две: на терне за вторую
+    # придётся заплатить снова. Правило 4x тут завышало эквити почти
+    # вдвое (флеш-дро «36%» против цены 33% — на деле 19%). Недобор
+    # закрывают неявные пот-оддсы: когда дро заходит, оппонент доплачивает.
+    one_card = street == 'flop' and not spot.all_in
+    equity = he.equity_from_outs(outs, 'turn' if one_card else street)
+    eff = price if spot.all_in else implied_price(spot.to_call_bb, spot.pot_bb,
+                                                  spot.stack_bb, st['implied_pot_mult'])
+    eff = price if eff is None else eff
+    note = '' if eff == price else f' (с имплайд-оддсами, чистая цена {price:.0%})'
+    need = eff / spot.price_mult
+    if equity > need:
+        return _d('call', f'дро {draws}: {outs} аутов ~{equity:.0%} > цены {need:.0%}{note}')
+    if street == 'flop' and 'flush' in draws and spot.hu and not spot.no_raise:
+        return _raise_pot(f'сильное дро {draws}: полу-блеф', spot.pot_bb, spot.semi)
+    return _d('fold', f'дро {draws}: {equity:.0%} < цены {need:.0%}{note}')
+
+
+def _lead(spot):
+    """Строка матрицы «нам чекнули / мы первые»: ставка или чек."""
+    st, name, made, street = spot.st, spot.name, spot.made, spot.street
+    if spot.no_raise:
         return _d('check', f'{name}: ставить нечем (живого пресета нет) — чек')
-    if big_made and made == 'weak':
+    if spot.big_made and made == 'weak':
         # младший флеш/стрит: ставкой мы соберём велью только от того, кто бьёт
         return _d('check', f'{name}: младшая рука — чек, идём на шоудаун')
     if made in ('nuts', 'strong'):
         # с непобиваемой рукой ставим крупнее: пресет 75% банка вместо 50%
-        return _raise_pot(f'{name}: ставка на велью', pot_bb,
-                          chart.bet_frac(made, street, multiway=multiway, short=short))
+        return _raise_pot(f'{name}: ставка на велью', spot.pot_bb, spot.bet_frac(made))
     if made == 'medium':
-        # тонкое велью — только там, где его заплатят: не против троих и не без позиции
-        if multiway:
-            return _d('check', f'{name}: не ставим тонко против {players} игроков')
-        if st['position_aware'] and oop and street == 'flop':
-            return _d('check', f'{name}: без позиции — чек вместо конт-бета')
-        if street == 'flop' or (short and street == 'turn'):
-            return _raise_pot(f'{name}: конт-бет', pot_bb,
-                              chart.bet_frac('medium', street, short=short))
-        return _d('check', f'{name}: контроль банка на {street}')
-    if street == 'river' and st['blocker_bluff'] and not multiway and made in ('air', 'draw'):
+        return _lead_medium(spot)
+    if street == 'river' and st['blocker_bluff'] and not spot.multiway and made in ('air', 'draw'):
         # Блеф с блокером: натс-флеша/старшего стрита у оппонента быть не может.
         # Идёт до разбора дро: на ривере доборной карты нет, «флеш-дро» с тузом
         # масти — это и есть воздух с блокером. Частоту ограничивает главный
         # цикл (bluff_ok), иначе бот блефовал бы в каждой такой раздаче.
-        blocker = nut_blocker(hole, board)
-        if blocker and bluff_ok:
+        blocker = nut_blocker(spot.hole, spot.board)
+        if blocker and spot.bluff_ok:
             # больше банка не ставим — как и в bet_frac: крупнее пресета «100%»
             # в клиенте ничего нет, а в лог и историю уходил бы выдуманный размер
-            return _raise_pot(f'блеф с блокером ({blocker})', pot_bb,
+            return _raise_pot(f'блеф с блокером ({blocker})', spot.pot_bb,
                               round(min(st['blocker_bluff_pot'] * st['aggression'], 1.0), 3))
         if blocker:
             return _d('check', f'{name}: блокер {blocker}, но блеф слишком часто — чек')
-    if made == 'draw' or draws:
-        if street in ('flop', 'turn') and hu:
-            return _raise_pot(f'дро {draws} ({outs} аутов): полу-блеф', pot_bb, semi)
-        return _d('check', f'дро {draws}: смотрим карту бесплатно')
-    if street == 'flop' and hu:
-        return _raise_pot('воздух: конт-бет один раз в хедз-апе', pot_bb, semi)
+    if made == 'draw' or spot.draws:
+        if street in ('flop', 'turn') and spot.hu:
+            return _raise_pot(f'дро {spot.draws} ({spot.outs} аутов): полу-блеф',
+                              spot.pot_bb, spot.semi)
+        return _d('check', f'дро {spot.draws}: смотрим карту бесплатно')
+    if street == 'flop' and spot.hu:
+        return _raise_pot('воздух: конт-бет один раз в хедз-апе', spot.pot_bb, spot.semi)
     return _d('check', f'{name}: чек')
+
+
+def _lead_medium(spot):
+    """Та же строка матрицы, клетка «средняя рука»: тонкое велью или контроль банка."""
+    st, name, street = spot.st, spot.name, spot.street
+    # тонкое велью — только там, где его заплатят: не против троих и не без позиции
+    if spot.multiway:
+        return _d('check', f'{name}: не ставим тонко против {spot.players} игроков')
+    if st['position_aware'] and spot.oop and street == 'flop':
+        return _d('check', f'{name}: без позиции — чек вместо конт-бета')
+    if street == 'flop' or (spot.short and street == 'turn'):
+        return _raise_pot(f'{name}: конт-бет', spot.pot_bb,
+                          spot.bet_frac('medium', short=spot.short))
+    return _d('check', f'{name}: контроль банка на {street}')
 
 
 def _bet_size(pot_bb, fraction):

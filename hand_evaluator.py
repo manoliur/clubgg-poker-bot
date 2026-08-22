@@ -373,13 +373,38 @@ def _board_flush_threat(hole, board):
     return None
 
 
+# Кэш разбора руки. Разбор семи карт — самая дорогая часть решения (перебор 21
+# пятёрки), а за один ход его просят два-три раза с одними и теми же картами:
+# сама стратегия, повторный вопрос с no_raise (рейз недоступен) и hand_note для
+# строки лога. Ключ — карты, результат от них не зависит больше ни от чего.
+# ВАЖНО: словарь отдаётся БЕЗ копии, менять его на месте нельзя.
+_CLASS_CACHE = {}
+_CLASS_CACHE_MAX = 512          # больше не копим: за сессию рук тысячи
+
+
 def hand_class(hole, board):
     """Классификация руки для постфлоп-стратегии.
 
     Возвращает dict: score, category, name, made ('nuts'/'strong'/'medium'/'weak'/'air'),
     made_note (чем определена сила), pair_type ('overpair'/'top'/'middle'/'bottom'/None),
     draws.
+
+    Результат кэшируется по картам (см. _CLASS_CACHE) и отдаётся общим на всех —
+    менять полученный словарь нельзя.
     """
+    key = (tuple(hole), tuple(board))
+    hit = _CLASS_CACHE.get(key)
+    if hit is not None:
+        return hit
+    result = _classify(hole, board)
+    if len(_CLASS_CACHE) >= _CLASS_CACHE_MAX:
+        _CLASS_CACHE.clear()
+    _CLASS_CACHE[key] = result
+    return result
+
+
+def _classify(hole, board):
+    """Сам разбор руки (без кэша) — см. hand_class."""
     hole, board = list(hole), list(board)
     cards = hole + board
     result = {'draws': [], 'pair_type': None, 'made_note': ''}
