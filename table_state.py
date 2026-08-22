@@ -3,6 +3,7 @@
 
 Всё локально, без ИИ. Основные функции:
     read_state(img)      -> полный снимок состояния (dict)
+    read_state(img, light=True) -> то же без скана столбца ставки (fill_presets)
     is_my_turn(img)      -> появились ли настоящие кнопки действий
     find_dealer(img)     -> где кнопка D ('me' / 'opp' / номер места по кругу)
     count_players(img)   -> сколько игроков в раздаче (2..6)
@@ -705,8 +706,35 @@ def first_to_act(street, n_players, hero_is_dealer, dealer_seat=None, occupied=N
 # --------------------------------------------------------------------------
 # полный снимок состояния
 # --------------------------------------------------------------------------
-def read_state(img, tpl_dir=None):
-    """Полное состояние стола по скриншоту (dict)."""
+def fill_presets(state, img):
+    """Дочитать столбец ставки в лёгкое состояние (см. read_state(light=True)).
+
+    Пресеты нужны ровно одному решению — рейзу: по ним считается точка тапа и
+    видно, доступна ли ставка вообще. Всё остальное (фолд, чек, колл) тапает по
+    кнопкам нижней полосы, и скан столбца для него — лишняя работа на каждом
+    кадре. Состояние правится на месте и возвращается.
+    """
+    if not state.get('light'):
+        return state
+    state['light'] = False
+    if state.get('showdown'):
+        return state                     # на вскрытии столбца нет (см. read_state)
+    state['raise_presets'] = raise_presets(img)
+    state['chevron'] = chevron_point(img)
+    state['presets_collapsed'] = presets_collapsed(state['raise_presets'],
+                                                   state['chevron'])
+    return state
+
+
+def read_state(img, tpl_dir=None, light=False):
+    """Полное состояние стола по скриншоту (dict).
+
+    light=True — «лёгкое» чтение: без скана столбца ставки (raise_presets и
+    шеврон). Всё, по чему принимается решение (карты, банк, сумма колла,
+    позиция, кнопки), читается как обычно, поэтому фолд и чек играются прямо с
+    лёгкого состояния. Понадобился рейз — столбец дочитывается по ТОМУ ЖЕ кадру
+    (fill_presets), без нового скриншота.
+    """
     cards = card_reader.read_table(img, tpl_dir=tpl_dir)
     board = cards['board']
     hole = cards['hole']
@@ -721,8 +749,8 @@ def read_state(img, tpl_dir=None):
     # ходом это не считаем и кнопок не отдаём, иначе бот тапнет «Показать»
     showdown = is_showdown(img)
     buttons = [] if showdown else detect_action_buttons(img)
-    presets = [] if showdown else raise_presets(img)
-    chevron = None if showdown else chevron_point(img)
+    presets = [] if showdown or light else raise_presets(img)
+    chevron = None if showdown or light else chevron_point(img)
     my_turn = len(buttons) >= 1
     bet = has_bet(img)
     street = STREETS.get(len(board), 'unknown')
@@ -749,6 +777,8 @@ def read_state(img, tpl_dir=None):
         'raise_presets': presets,
         'chevron': chevron,
         'presets_collapsed': presets_collapsed(presets, chevron),
+        # столбец ставки ещё не читали: перед рейзом его дочитает fill_presets
+        'light': bool(light) and not showdown,
         'showdown': showdown,
         'has_bet': bet,
         'call_fp': call_amount_fp(img),

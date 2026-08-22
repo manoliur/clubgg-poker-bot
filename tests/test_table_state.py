@@ -5,6 +5,7 @@ import sys
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import cv2
 
@@ -122,6 +123,61 @@ class ChevronTest(unittest.TestCase):
         s = ts.read_state(synth.render(hole=['Ah', 'Kd'], showdown=True, chevron=True))
         self.assertIsNone(s['chevron'])
         self.assertFalse(s['presets_collapsed'])
+
+
+class LightStateTest(unittest.TestCase):
+    """Лёгкое чтение: столбец ставки сканируется только под рейз (см. fill_presets)."""
+
+    def frame(self):
+        return synth.render(hole=['Ah', 'Kd'], buttons=True, presets=3, chevron=True)
+
+    def test_light_state_skips_preset_scan(self):
+        img = self.frame()
+        with mock.patch.object(ts, 'raise_presets') as presets, \
+             mock.patch.object(ts, 'chevron_point') as chevron:
+            s = ts.read_state(img, light=True)
+        presets.assert_not_called()
+        chevron.assert_not_called()
+        self.assertEqual(s['raise_presets'], [])
+        self.assertIsNone(s['chevron'])
+        self.assertFalse(s['presets_collapsed'])
+        self.assertTrue(s['light'], 'состояние помечено как недочитанное')
+
+    def test_light_state_keeps_everything_decision_needs(self):
+        """Всё, по чему принимается решение, лёгкое чтение отдаёт как полное."""
+        img = self.frame()
+        light = ts.read_state(img, light=True)
+        full = ts.read_state(img)
+        for key in ('my_turn', 'in_hand', 'hole', 'board', 'street', 'has_bet',
+                    'pot_bb', 'to_call_bb', 'players', 'players_seated', 'position',
+                    'dealer', 'first_to_act', 'taps', 'showdown'):
+            self.assertEqual(light[key], full[key], key)
+
+    def test_fill_presets_reads_column_from_the_same_frame(self):
+        img = self.frame()
+        s = ts.read_state(img, light=True)
+        self.assertIs(ts.fill_presets(s, img), s, 'состояние правится на месте')
+        self.assertFalse(s['light'])
+        self.assertEqual(s['raise_presets'], ts.raise_presets(img))
+        self.assertEqual(s['chevron'], ts.chevron_point(img))
+
+    def test_fill_presets_does_nothing_on_a_full_state(self):
+        img = self.frame()
+        s = ts.read_state(img)
+        with mock.patch.object(ts, 'raise_presets') as presets:
+            ts.fill_presets(s, img)
+        presets.assert_not_called()
+
+    def test_showdown_stays_without_presets(self):
+        """На вскрытии столбца нет вовсе — дочитывать нечего (и тапать нельзя)."""
+        img = synth.render(hole=['Ah', 'Kd'], showdown=True, chevron=True)
+        s = ts.read_state(img, light=True)
+        self.assertTrue(s['showdown'])
+        self.assertFalse(s['light'])
+        with mock.patch.object(ts, 'raise_presets') as presets:
+            ts.fill_presets(s, img)
+        presets.assert_not_called()
+        self.assertEqual(s['raise_presets'], [])
 
 
 class ShowdownTest(unittest.TestCase):

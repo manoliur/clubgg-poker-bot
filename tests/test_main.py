@@ -30,8 +30,10 @@ class FakeScreen:
     def __init__(self, frames):
         self.frames = list(frames)
         self.taps = []
+        self.grabs = 0          # скриншотов сделано (на телефоне это ~1.7с каждый)
 
     def grab(self):
+        self.grabs += 1
         return self.frames.pop(0) if self.frames else None
 
     def tap(self, x, y):
@@ -559,7 +561,7 @@ class MainLoopTest(IsolatedBotTest):
                             'ререйз обязан менять сигнатуру (сумма колла)')
         states = iter([st1] * 4 + [st2] * 4)
 
-        def fake_read(img, tpl_dir=None):
+        def fake_read(img, tpl_dir=None, light=False):
             return next(states)
 
         screen = FakeScreen([frame] * 8)
@@ -590,7 +592,7 @@ class MainLoopTest(IsolatedBotTest):
         opp['my_turn'] = False             # оппонент думает/переставляет
         states = iter([mine, mine] + [opp] * 3 + [mine] * 4)
 
-        def fake_read(img, tpl_dir=None):
+        def fake_read(img, tpl_dir=None, light=False):
             return next(states)
 
         screen = FakeScreen([frame] * 12)
@@ -652,6 +654,110 @@ class MainLoopTest(IsolatedBotTest):
             bot.run(interval=0, settle=0, max_actions=2, retry_after=0)
         self.assertEqual(bot.actions, 2, 'чек повторяем, пока состояние не сменилось')
         self.assertEqual(len(screen.taps), 2)
+
+    # ---------- быстрый путь: сколько скриншотов стоит ход ----------
+    def unsure_cards(self):
+        """Карты «прочитаны неуверенно» — то состояние, ради которого и было
+        задумано перечитывание кадра (rank_score ниже порога)."""
+        return mock.patch.object(Bot, '_cards_ok', staticmethod(lambda state, *a, **k: False))
+
+    def frames_to_act(self, frames, **kw):
+        """Прогнать один ход и вернуть (сколько скриншотов, сколько тапов)."""
+        screen = FakeScreen(frames)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'), **kw)
+        with mock.patch.object(main_mod.time, 'sleep'):
+            bot.run(interval=0, settle=0, max_actions=1, retry_after=1000)
+        return screen.grabs, len(screen.taps)
+
+    def test_fold_costs_one_frame(self):
+        """Фолд мусора без вложений: один скриншот от появления хода до тапа.
+
+        Раньше кадр перечитывался ДО решения, поэтому неуверенно прочитанные
+        карты стоили ещё двух скриншотов (~3.4с) даже там, где карты ничего не
+        решают: мусор сбрасывается при любом чтении.
+        """
+        frame = synth.render(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], buttons=True,
+                             call_amount=True, dealer='opp', players=2)
+        with self.unsure_cards():
+            grabs, taps = self.frames_to_act([frame] * 6)
+        self.assertEqual(taps, 1)
+        self.assertEqual(grabs, 1, 'фолд не перечитывает карты')
+
+    def test_check_costs_one_frame(self):
+        """Чек — то же самое: бесплатное действие ошибки распознавания не боится."""
+        frame = synth.render(hole=['Kh', '2h'], board=['6s', '4d', '9d', '4h', '3c'],
+                             buttons=True, call_amount=False, dealer='opp', players=2)
+        with self.unsure_cards():
+            grabs, taps = self.frames_to_act([frame] * 6)
+        self.assertEqual(taps, 1)
+        self.assertEqual(grabs, 1, 'чек не перечитывает карты')
+
+    def test_raise_still_confirms_cards(self):
+        """А вот под рейз карты перечитываются, как и раньше: там они — деньги."""
+        frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
+                             call_amount=True, dealer='me', players=2)   # сет -> рейз
+        with self.unsure_cards():
+            grabs, taps = self.frames_to_act([frame] * 6)
+        self.assertEqual(taps, 1)
+        self.assertEqual(grabs, 3, 'кадр + два перечитывания (card_confirm=2)')
+
+    def test_missing_card_is_reread_even_for_a_fold(self):
+        """Карта не прочиталась вовсе — решение принято по одной, а это наугад."""
+        partial = synth.render(hole=['7h', None], board=['Ad', 'Ks', '9c'], buttons=True,
+                               call_amount=True, dealer='opp', players=2)
+        full = synth.render(hole=['7h', '2c'], board=['Ad', 'Ks', '9c'], buttons=True,
+                            call_amount=True, dealer='opp', players=2)
+        grabs, taps = self.frames_to_act([partial] + [full] * 5)
+        self.assertEqual(taps, 1)
+        self.assertEqual(grabs, 2, 'одно перечитывание — и хватит')
+
+    def test_routine_action_taps_before_the_expensive_reads(self):
+        """Рутина тапает ПЕРВОЙ, а ники и столбец ставки её не задерживают.
+
+        Ники — самое дорогое место кадра (на каждое занятое место запускается
+        tesseract), и раньше они читались до решения, на первом ходе раздачи —
+        то есть ровно перед префлоп-фолдом.
+        """
+        frame = synth.render(hole=['7h', '2c'], board=[], buttons=True,
+                             call_amount=True, dealer='opp', players=2)
+        screen = FakeScreen([frame] * 6)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        bot.tesseract = 'tesseract'          # чтение ников включено (сам вызов замокан)
+        order = []
+        with mock.patch.object(main_mod.time, 'sleep'), \
+             mock.patch.object(main_mod.nick_reader, 'read_nicks',
+                               side_effect=lambda *a, **k: order.append('ники') or {}), \
+             mock.patch.object(screen, 'tap', side_effect=lambda x, y: order.append('тап')), \
+             mock.patch.object(main_mod.ts, 'raise_presets') as presets:
+            bot.run(interval=0, settle=0, max_actions=1, retry_after=1000)
+        self.assertEqual(order[:2], ['тап', 'ники'], 'ники читаются уже после тапа')
+        self.assertEqual(presets.call_count, 0, 'столбец ставки под фолд не сканируется')
+
+    def test_repeated_decision_after_opponent_costs_one_frame(self):
+        """«Ход вернулся после оппонента» — решаем заново, но карты не перечитываем.
+
+        Живой лог: одно и то же решение повторялось по 3-4 раза с интервалами
+        12-20с — каждый повтор шёл полным циклом с перечитыванием карт.
+        """
+        mine = synth.render(hole=['Qs', 'Qc'], board=[], buttons=True,
+                            call_amount=True, dealer='opp', players=2)
+        opp = synth.render(hole=['Qs', 'Qc'], board=[], buttons=False, players=2)
+        screen = FakeScreen([mine] * 3 + [opp] + [mine] * 3)
+        bot = Bot(screen, tpl_dir=self.tpl, log_path=os.path.join(self.tmp, 'bot.log'),
+                  history_path=os.path.join(self.tmp, 'hand_history.jsonl'))
+        at_tap = []
+        tap = screen.tap
+        with self.unsure_cards(), mock.patch.object(main_mod.time, 'sleep'), \
+             mock.patch.object(screen, 'tap',
+                               side_effect=lambda x, y: (at_tap.append(screen.grabs),
+                                                         tap(x, y))):
+            bot.run(interval=0, settle=0, max_actions=2, retry_after=1000)
+        self.assertEqual(bot.actions, 2, 'ход вернулся = новое решение')
+        self.assertEqual(at_tap[0], 3, 'первое решение — денежное: кадр + два перечитывания')
+        self.assertEqual(at_tap[1] - at_tap[0], 2,
+                         'повтор: кадр оппонента + кадр решения, перечитывания нет')
 
     def test_waits_for_both_hole_cards(self):
         """Не действуем, пока не распознаны ОБЕ карманные карты — перечитываем кадр.

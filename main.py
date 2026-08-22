@@ -165,6 +165,8 @@ class Bot:
         self.log_path = log_path or config.LOG_FILE
         self.history_path = history_path or config.HAND_HISTORY
         self.hand_id = 0
+        self.card_confirm = 2           # перечитываний кадра ради карт (см. run)
+        self._fresh_hand = False        # стек и ники этой раздачи ещё не читали
         self.raised_preflop = False     # мы уже поднимали на этом префлопе
         self.reset_lines()              # что оппонент делал в этой раздаче
         self.last_hole = None
@@ -830,6 +832,74 @@ class Bot:
         return strategy.decide(state, profile=self.opponent_profile(state),
                                stack_bb=self.stack_bb, chart=self.chart)
 
+    # ---------- подтверждение карт (только для «денежных» решений) ----------
+    def confirm_tries(self, state, decision, tries):
+        """Сколько раз перечитывать кадр ради карт под ЭТО решение.
+
+        Перечитывание стоит целого скриншота (adb отдаёт кадр ~1.7с), поэтому
+        платить за него имеет смысл там, где карты решают деньги: рейз, колл и
+        фолд руки, в которую мы уже вложились. Фолд мусора и чек — безопасны при
+        любой ошибке распознавания, и второй кадр на них только съедал время
+        хода (три кадра подряд = 5с из 20-30с, отведённых клиентом).
+
+        Особый случай — карта не прочиталась ВОВСЕ (в hole меньше двух штук):
+        решение принято по одной карте, то есть почти наугад, и одно
+        перечитывание окупается даже под фолд (живой тест: [None,'2c']).
+        """
+        if tries <= 0:
+            return 0
+        if len([c for c in state['hole'] if c]) < 2:
+            return 1
+        if decision['action'] in ('raise', 'call'):
+            return tries
+        if decision['action'] == 'fold' and self.invested():
+            return tries
+        return 0
+
+    def confirm_decision(self, state, img, decision, tries):
+        """Перечитать карты и перерешить. -> (состояние, кадр, решение, ушёл ли ход).
+
+        Зовётся уже ПОСЛЕ первого решения: до него неизвестно, ставим мы деньги
+        или нет, а значит — стоит ли кадр перечитывания (см. confirm_tries).
+        Карты прочитаны уверенно — ничего не делаем вовсе.
+        """
+        tries = 0 if self._cards_ok(state) else self.confirm_tries(state, decision, tries)
+        if not tries:
+            return state, img, decision, False
+        self.log(f"карты прочитаны неуверенно ({pretty_cards(state['hole'])}), "
+                 f"решение {decision['action'].upper()} — перечитываю кадр")
+        for _ in range(tries):
+            img2 = self.screen.grab()
+            if img2 is None:
+                break
+            img = img2
+            state = self.last_state = ts.read_state(img, tpl_dir=self.tpl_dir, light=True)
+            if not (state['my_turn'] and state['in_hand']):
+                return state, img, decision, True
+            if self._cards_ok(state):
+                break
+        return state, img, self.decide(state), False
+
+    def read_hand_context(self, img, state):
+        """Стек и ники раздачи — один раз за раздачу, по свежему кадру.
+
+        Оба чтения дорогие (у ников на каждое занятое место запускается
+        tesseract), а меняются они только между раздачами. Рутина их не ждёт:
+        фолд и чек играются на прежних значениях, и читаем мы всё сразу ПОСЛЕ
+        тапа — к следующему ходу раздачи цифры уже свежие. Перед решением, в
+        котором деньги идут в банк, наоборот: сначала читаем, потом решаем.
+        """
+        if not self._fresh_hand:
+            return False
+        self._fresh_hand = False
+        # стек: короткий стек, «колл ≥ доли стека = алл-ин» и имплайд-оддсы
+        # должны считаться от правды, а не от константы, записанной в панели
+        self.update_stack(img)
+        # ники: профиль должен держаться за человека, а не за место — иначе
+        # пересевший игрок заводит себе второй профиль
+        self.update_nicks(img, state)
+        return True
+
     def wants_expand(self, state, pot_frac=None):
         """Надо ли раскрывать свёрнутый столбец ставки перед рейзом/бетом.
 
@@ -907,18 +977,23 @@ class Bot:
         return action, state['taps'].get('call' if action in ('call', 'check') else action)
 
     # ---------- один шаг ----------
-    def step(self, img=None, state=None):
+    def step(self, img=None, state=None, card_confirm=None):
         """Один проход. Возвращает запись раздачи (dict) или None, если ход не наш.
 
         state можно передать готовым (run читает его для своих проверок) — тогда
         повторно кадр не снимается и состояние не перечитывается.
+
+        card_confirm — сколько раз разрешено перечитать кадр ради карт (None =
+        как задано в run). 0 запрещает перечитывание совсем: так решается заново
+        ход, вернувшийся после оппонента, — карты в раздаче те же, и платить за
+        них ещё одним скриншотом незачем.
         """
         if state is None:
             img = self.screen.grab() if img is None else img
             if img is None:
                 self.log('ERR: не получен скриншот (adb)')
                 return None
-            state = ts.read_state(img, tpl_dir=self.tpl_dir)
+            state = ts.read_state(img, tpl_dir=self.tpl_dir, light=True)
         self.last_state = state
         self.track_hand(state)       # не закончилась ли прошлая раздача
         self.observe(state)          # кадр в память оппонентов (в run — на каждом)
@@ -939,16 +1014,28 @@ class Bot:
             self.hand_id += 1
             self.last_hole = hole
             self.raised_preflop = False
-            # стек читаем на первом ходе раздачи: короткий стек, «колл ≥ доли
-            # стека = алл-ин» и имплайд-оддсы должны считаться от правды, а не
-            # от константы, записанной в панели один раз
-            self.update_stack(img)
-            # и ники: профиль должен держаться за человека, а не за место —
-            # иначе пересевший игрок заводит себе второй профиль
-            self.update_nicks(img, state)
+            self._fresh_hand = True      # стек и ники — см. read_hand_context
 
         self.track_lines(state)      # что оппонент успел сделать до нашего хода
         decision = self.decide(state)
+        # карты перечитываем ТОЛЬКО под решение, где они стоят денег: до первого
+        # решения неизвестно, фолд это мусора или рейз (см. confirm_decision)
+        tries = self.card_confirm if card_confirm is None else card_confirm
+        state, img, decision, gone = self.confirm_decision(state, img, decision, tries)
+        if gone:
+            self.stable = 0
+            return None
+        confirmed = [c for c in state['hole'] if c]
+        if confirmed and confirmed != hole:
+            # играем по перечитанным картам: иначе следующий кадр примет ту же
+            # раздачу за новую (last_hole остался бы на неполном чтении)
+            hole = self.last_hole = confirmed
+        if decision['action'] in ('raise', 'call'):
+            # деньги идут в банк: стек и ники читаем ДО решения, а не после тапа
+            if self.read_hand_context(img, state):
+                decision = self.decide(state)
+        if decision['action'] == 'raise':
+            ts.fill_presets(state, img)  # столбец ставки нужен только рейзу
         # свёрнутый столбец ставки: сначала раскрыть его шевроном, потом решать
         # заново по перерисованному кадру — одно «действие» бота из двух тапов
         if decision['action'] == 'raise' and self.wants_expand(state, decision.get('pot_frac')):
@@ -1014,6 +1101,9 @@ class Bot:
         if not self.dry_run and point:
             entry['think_s'] = self.think(action)
             self.screen.tap(*point)
+        # стек и ники этой раздачи (если решение было рутинным и их не читали):
+        # уже ПОСЛЕ тапа — ход отдан, а к следующему решению цифры будут свежими
+        self.read_hand_context(img, state)
         if state['street'] == 'preflop' and action == 'raise':
             self.raised_preflop = True   # дальше ставка перед нами — уже ререйз
         self._line_acted[state['street']] = action   # по нему видно чек-чек улицы
@@ -1069,9 +1159,15 @@ class Bot:
 
         idle-поллинг с паузой interval; на ходу кадры снимаются подряд (без паузы),
         два стабильных кадра подряд = ход действительно наш (не анимация).
+
+        card_confirm — сколько раз разрешено перечитать кадр ради неуверенно
+        прочитанных карт. Тратится это право только на «денежные» решения (см.
+        confirm_tries): фолд мусора и чек играются с первого кадра, то есть один
+        скриншот от появления хода до тапа.
         """
         self.log('=== БОТ ЗАПУЩЕН (без ИИ) ===' + (' dry-run' if self.dry_run else ''))
         self.log_memory()
+        self.card_confirm = card_confirm
         fails = 0
         acted_sig = None
         acted_ts = 0.0
@@ -1090,7 +1186,10 @@ class Bot:
                         time.sleep(2)
                         continue
                     fails = 0
-                    state = ts.read_state(img, tpl_dir=self.tpl_dir)
+                    # лёгкое чтение: столбец ставки на кадре не сканируем — он
+                    # нужен одному решению из четырёх, и step дочитает его сам
+                    state = ts.read_state(img, tpl_dir=self.tpl_dir, light=True)
+                    replay = False          # это повторное решение того же хода
                     self.track_hand(state)  # граница раздачи чаще всего проходит без нас
                     self.observe(state)     # оппоненты играют как раз не на нашем ходу
                     if not (state['my_turn'] and state['in_hand']):
@@ -1116,6 +1215,7 @@ class Bot:
                                      'решаю заново')
                             acted_sig = None
                             opp_acted = False
+                            replay = True   # карты те же — перечитывать их нечего
                         else:
                             self.stable = 0      # тот же ход, где мы уже сыграли
                             if interval:
@@ -1133,6 +1233,7 @@ class Bot:
                                 time.sleep(interval)
                             continue
                         self._retries += 1
+                        replay = True       # тот же ход, те же карты
                         self.log('состояние не изменилось после хода — повторяю решение')
                     else:
                         self._retries = 0
@@ -1145,25 +1246,11 @@ class Bot:
                     if self.stable < stable_frames:
                         continue             # без паузы: добираем подтверждающий кадр
                     self.stable = 0
-                    # подтверждение КАРТ: действуем только когда обе карманные карты
-                    # распознаны и уверенно (живые тесты: [None,2c] и 7d->2d ломали
-                    # решения). Перечитываем кадр до card_confirm раз; если так и не
-                    # вышло — действуем безопасно (step сам выберет чек/фолд).
-                    for _ in range(card_confirm):
-                        if self._cards_ok(state):
-                            break
-                        img = self.screen.grab()
-                        if img is None:
-                            break
-                        state = ts.read_state(img, tpl_dir=self.tpl_dir)
-                        self.last_state = state
-                        if not (state['my_turn'] and state['in_hand']):
-                            break
-                    if not (state['my_turn'] and state['in_hand']):
-                        if interval:
-                            time.sleep(interval)
-                        continue
-                    entry = self.step(img, state)
+                    # подтверждение КАРТ переехало в step: до решения неизвестно,
+                    # стоит ли оно лишнего скриншота (см. confirm_tries). Повтор
+                    # того же хода играется вовсе без перечитывания — карты в
+                    # раздаче не менялись.
+                    entry = self.step(img, state, card_confirm=0 if replay else card_confirm)
                     if entry is None:
                         if interval:
                             time.sleep(interval)
@@ -1252,7 +1339,8 @@ def main(argv=None):
               players_db=load_players_db(), tpl_dir=args.templates, chart=chart,
               serial=args.serial or config.SERIAL, devices_path=args.devices, cfg=cli_cfg)
     if args.image or args.once:
-        entry = bot.step()
+        # разбор кадра из файла: перечитывать нечего — кадр всегда один и тот же
+        entry = bot.step(card_confirm=0 if args.image else None)
         if entry is not None:
             print(json.dumps(entry, ensure_ascii=False, indent=2))
         elif bot.last_state is None:
