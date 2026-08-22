@@ -226,7 +226,7 @@ def draw_chevron(img):
     Ею столбец сворачивается и раскрывается; бот ищет её по жёлтой галке.
     """
     W, H = img.shape[1], img.shape[0]
-    cx, cy = config.scale(config.CHEVRON, W, H)
+    cx, cy = config.tap_point(config.CHEVRON, W, H)
     w, h = config.scale(config.CHEVRON_BOX, W, H)
     _rounded_rect(img, cx - w // 2, cy - h // 2, cx + w // 2, cy + h // 2, BTN_GRAY, r=10)
     arm, thick = w // 4, max(3, h // 8)
@@ -332,7 +332,7 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
         # вскрытие: плашки «Показать» стоят ровно на местах кнопок действий,
         # отличает их только белое лицо карты внутри
         for center in (config.BTN_FOLD, config.BTN_CALL, config.BTN_RAISE):
-            cx, cy = config.scale(center, W, H)
+            cx, cy = config.tap_point(center, W, H)
             draw_button(img, (cx, cy), int(W * 0.30), int(H * 0.048))
             draw_card(img, cx + 20, cy - int(H * 0.018), 125, 85, None)
         return img
@@ -340,7 +340,7 @@ def render(hole=None, board=None, buttons=True, call_amount=False,
     if buttons:
         for name, center in (('fold', config.BTN_FOLD), ('call', config.BTN_CALL),
                              ('raise', config.BTN_RAISE)):
-            c = config.scale(center, W, H)
+            c = config.tap_point(center, W, H)
             amount = None
             if name == 'call' and call_amount:
                 # call_amount=True — прежние 2.5ББ, числом — любая сумма колла

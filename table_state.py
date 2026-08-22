@@ -128,8 +128,8 @@ def detect_action_buttons(img):
     H, W = img.shape[:2]
     y0, y1 = int(H * config.ACTION_BAR_Y[0]), int(H * config.ACTION_BAR_Y[1])
     x_min = int(config.ACTION_BAR_X0 * W / config.REF_W)
-    call_x = config.BTN_CALL[0] * W / config.REF_W
-    raise_x = config.BTN_RAISE[0] * W / config.REF_W
+    call_x = config.BTN_CALL[0] * W
+    raise_x = config.BTN_RAISE[0] * W
     strip = img[y0:y1, :]
     mask = gray_button_mask(strip)
     col = (mask > 0).sum(axis=0)
@@ -234,7 +234,7 @@ def chevron_point(img):
     только «Фолд»/«Колл»), нет и шеврона: раскрывать тогда нечего.
     """
     H, W = img.shape[:2]
-    cx, cy = config.scale(config.CHEVRON, W, H)
+    cx, cy = config.tap_point(config.CHEVRON, W, H)
     dx, dy = config.scale(config.CHEVRON_BOX, W, H)
     x0, y0 = max(0, cx - dx // 2), max(0, cy - dy // 2)
     win = img[y0:min(H, cy + dy // 2), x0:min(W, cx + dx // 2)]
@@ -292,12 +292,13 @@ def action_points(img):
     Найденную кнопку привязываем к действию по эталонному центру, который в неё
     попал (по порядку нельзя: поиск идёт только правее ACTION_BAR_X0, поэтому
     «Фолд» слева не детектится и btns[0] — это «Колл»). Что не нашлось —
-    остаётся эталонной координатой из config.
+    остаётся точкой из долей config, пересчитанной под размер ЭТОГО кадра
+    (на экране 1080x2340 «Фолд» — не 2315, а 2257).
     """
     H, W = img.shape[:2]
-    ref = {'fold': config.scale(config.BTN_FOLD, W, H),
-           'call': config.scale(config.BTN_CALL, W, H),
-           'raise': config.scale(config.BTN_RAISE, W, H)}
+    ref = {'fold': config.tap_point(config.BTN_FOLD, W, H),
+           'call': config.tap_point(config.BTN_CALL, W, H),
+           'raise': config.tap_point(config.BTN_RAISE, W, H)}
     pts = dict(ref)
     x_min = int(config.ACTION_BAR_X0 * W / config.REF_W)
     for b in detect_action_buttons(img):

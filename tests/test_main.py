@@ -185,7 +185,7 @@ class MainLoopTest(IsolatedBotTest):
         frame = synth.render(hole=['9h', '9c'], board=['9d', '5s', '2c'], buttons=True,
                              call_amount=True, dealer='me', players=2)
         H, W = frame.shape[:2]
-        rx, _ = config.scale(config.BTN_RAISE, W, H)     # закрасить кнопку рейза сукном
+        rx, _ = config.tap_point(config.BTN_RAISE, W, H)     # закрасить кнопку рейза сукном
         frame[int(H * 0.86):, rx - int(W * 0.16):] = synth.FELT
         bot, screen = self.make_bot([frame])
         entry = bot.step()
@@ -396,7 +396,7 @@ class MainLoopTest(IsolatedBotTest):
         self.assertEqual(entry['action'], 'raise')
         self.assertEqual(len(screen.taps), 2, 'шеврон + пресет')
         W, H = frames[0].shape[1], frames[0].shape[0]
-        self.assertEqual(screen.taps[0], config.scale(config.CHEVRON, W, H))
+        self.assertEqual(screen.taps[0], config.tap_point(config.CHEVRON, W, H))
         self.assertGreater(screen.taps[1][0], int(config.PRESET_X[0] * W / config.REF_W),
                            'второй тап — по столбцу ставки')
         dead = ts.raise_presets(frames[1])[0]

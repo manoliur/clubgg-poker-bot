@@ -62,6 +62,58 @@ class ButtonsTest(unittest.TestCase):
             self.assertTrue(0 < x < W and H * 0.86 < y < H, (name, x, y))
 
 
+class TapPointTest(unittest.TestCase):
+    """Тапы в долях экрана: одна и та же точка попадает в кнопку на любом телефоне.
+
+    Второй телефон (Redmi 8) — 1080x2340 вместо 1080x2400, и жёсткая пиксельная
+    точка (185, 2315) била там на 60px ниже кнопки (wm size на MIUI без root не
+    поправить). Поэтому кнопки заданы долями, а в пиксели их переводит
+    config.tap_point по размеру ФАКТИЧЕСКОГО кадра.
+    """
+
+    SHORT = (1080, 2340)      # Redmi 8
+
+    def test_buttons_are_fractions(self):
+        self.assertEqual(config.BTN_FOLD, (185 / 1080, 2315 / 2400))
+        self.assertEqual(config.BTN_CALL, (535 / 1080, 2315 / 2400))
+        self.assertEqual(config.BTN_RAISE, (880 / 1080, 2315 / 2400))
+        self.assertEqual(config.CHEVRON, (617 / 1080, 2176 / 2400))
+        for pt in (config.BTN_FOLD, config.BTN_CALL, config.BTN_RAISE, config.CHEVRON):
+            self.assertTrue(all(0 < c < 1 for c in pt), pt)
+
+    def test_reference_screen_keeps_measured_pixels(self):
+        W, H = config.REF_W, config.REF_H
+        self.assertEqual(config.tap_point(config.BTN_FOLD, W, H), (185, 2315))
+        self.assertEqual(config.tap_point(config.BTN_CALL, W, H), (535, 2315))
+        self.assertEqual(config.tap_point(config.BTN_RAISE, W, H), (880, 2315))
+        self.assertEqual(config.tap_point(config.CHEVRON, W, H), (617, 2176))
+
+    def test_short_screen_scales_y(self):
+        W, H = self.SHORT
+        self.assertEqual(config.tap_point(config.BTN_FOLD, W, H), (185, 2257))
+        self.assertEqual(config.tap_point(config.BTN_CALL, W, H), (535, 2257))
+        self.assertEqual(config.tap_point(config.BTN_RAISE, W, H), (880, 2257))
+
+    def test_action_points_follow_frame_size(self):
+        """Точки тапа берутся из кадра: на 2340 они выше, чем на 2400, и в кнопках."""
+        for size in ((config.REF_W, config.REF_H), self.SHORT):
+            with self.subTest(size=size):
+                img = synth.render(hole=['Ah', 'Kd'], buttons=True, size=size)
+                H, W = img.shape[:2]
+                pts = ts.action_points(img)
+                self.assertEqual(pts['fold'], config.tap_point(config.BTN_FOLD, W, H))
+                for name in ('call', 'raise'):
+                    x, y = pts[name]
+                    ref_x, ref_y = config.tap_point(getattr(config, 'BTN_' + name.upper()), W, H)
+                    self.assertLess(abs(x - ref_x), W * 0.06, name)
+                    self.assertLess(abs(y - ref_y), H * 0.02, name)
+
+    def test_chevron_point_follows_frame_size(self):
+        img = synth.render(buttons=True, chevron=True, size=self.SHORT)
+        H, W = img.shape[:2]
+        self.assertEqual(ts.chevron_point(img), config.tap_point(config.CHEVRON, W, H))
+
+
 class RaisePresetsTest(unittest.TestCase):
     """Правый столбец ставки: какие пресеты видны и какие из них живые."""
 
@@ -98,7 +150,7 @@ class ChevronTest(unittest.TestCase):
         point = ts.chevron_point(synth.render(buttons=True, chevron=True))
         self.assertIsNotNone(point)
         W, H = config.REF_W, config.REF_H
-        self.assertEqual(point, config.scale(config.CHEVRON, W, H))
+        self.assertEqual(point, config.tap_point(config.CHEVRON, W, H))
 
     def test_no_chevron_no_point(self):
         self.assertIsNone(ts.chevron_point(synth.render(buttons=True)))

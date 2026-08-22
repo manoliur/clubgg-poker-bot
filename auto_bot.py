@@ -6,7 +6,7 @@
 2. Определяет позицию: кнопка D у меня (внизу) = SB, у оппонента (вверху) = BB.
    - Префлоп: первым ходит SB (у кого D). Постфлоп: первым ходит BB.
 3. МОЙ ХОД = в зоне x 520-1080 появились настоящие кнопки (Чек/Колл/Бет).
-   - Жёлтой суммы на кнопке колл нет -> ставок нет -> МГНОВЕННЫЙ ЧЕК (535,2315)
+   - Жёлтой суммы на кнопке колл нет -> ставок нет -> МГНОВЕННЫЙ ЧЕК в центр кнопки (доли экрана)
    - Жёлтая сумма есть -> оппонент поставил -> Клод на сервере решает -> тап
 4. После действия обновляет базу и ждёт следующий ход. Крутится вечно.
 
@@ -21,9 +21,12 @@ SERIAL = '1cf5db29'
 BASE = r'C:\Users\Vlad\clubgg_bot'
 SHOTS = os.path.join(BASE, 'shots')
 
-BTN_CHECK = (535, 2315)   # «Чек» / «Колл» — центр
-BTN_FOLD = (185, 2315)    # «Фолд» — слева
-BTN_BET = (880, 2315)     # «Бет 33%» / пресет рейза — справа
+# Точки тапа — в ДОЛЯХ экрана (сняты с эталона 1080x2400): у телефонов разная
+# высота экрана (1080x2400, 1080x2340), пиксельная точка мимо кнопки.
+REF_W, REF_H = 1080, 2400
+BTN_CHECK = (535 / REF_W, 2315 / REF_H)   # «Чек» / «Колл» — центр
+BTN_FOLD = (185 / REF_W, 2315 / REF_H)    # «Фолд» — слева
+BTN_BET = (880 / REF_W, 2315 / REF_H)     # «Бет 33%» / пресет рейза — справа
 
 LOG = os.path.join(BASE, 'auto_bot.log')
 
@@ -106,6 +109,11 @@ def have_my_cards(img):
 def tap(x, y):
     subprocess.run([ADB, '-s', SERIAL, 'shell', 'input', 'tap', str(x), str(y)], check=False)
 
+def point(img, frac):
+    """Доли экрана -> пиксели ФАКТИЧЕСКОГО кадра (он же экран телефона)."""
+    W, H = img.size
+    return int(round(frac[0] * W)), int(round(frac[1] * H))
+
 def ask_claude(img_path, timeout=25):
     """Позвать Клода на сервере. При превышении timeout — фолд (безопасно)."""
     try:
@@ -186,8 +194,9 @@ def main():
 
         if not has_call:
             # ставок нет -> мгновенный чек
-            tap(*BTN_CHECK)
-            log('AUTO_CHECK (535,2315)')
+            pt = point(img, BTN_CHECK)
+            tap(*pt)
+            log(f'AUTO_CHECK {pt}')
             log_action({'action': 'check', 'raise_to_bb': None,
                         'reason': 'auto_check (no bet)', 'source': 'local'}, position)
         else:
@@ -200,17 +209,21 @@ def main():
             action = decision.get('action', 'check')
             log(f'КЛОД ({dt}s): {json.dumps(decision, ensure_ascii=False)}')
             if action == 'fold':
-                tap(*BTN_FOLD)
-                log('TAP FOLD (185,2315)')
+                pt = point(img, BTN_FOLD)
+                tap(*pt)
+                log(f'TAP FOLD {pt}')
             elif action == 'call':
-                tap(*BTN_CHECK)
-                log('TAP CALL (535,2315)')
+                pt = point(img, BTN_CHECK)
+                tap(*pt)
+                log(f'TAP CALL {pt}')
             elif action == 'raise':
-                tap(*BTN_BET)
-                log(f'TAP RAISE (880,2315) raise_to={decision.get("raise_to_bb")}')
+                pt = point(img, BTN_BET)
+                tap(*pt)
+                log(f'TAP RAISE {pt} raise_to={decision.get("raise_to_bb")}')
             else:
-                tap(*BTN_CHECK)
-                log('TAP CHECK (535,2315)')
+                pt = point(img, BTN_CHECK)
+                tap(*pt)
+                log(f'TAP CHECK {pt}')
             log_action(decision, position)
 
         # ждём, пока кнопки исчезнут (ход принят), обновляем базу

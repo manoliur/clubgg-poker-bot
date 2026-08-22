@@ -4,8 +4,9 @@
 ВАЖНО (разобрано по кадрам):
 - НЕ мой ход: внизу одна кнопка «Чек/Фолд» с зелёной галочкой (АВТОДЕЙСТВИЕ, x 45-520)
 - МОЙ ход: три настоящие кнопки — «Фолд» (x 15-355), «Чек»/«Колл X» (центр ~535,2315), «Бет» (x 720-1035)
+  (пиксели здесь — эталон 1080x2400; тапаем по долям от размера кадра, см. point())
 - Детекция хода: дифф в зоне x 520-1080 (там при моём ходе появляются кнопки «Чек» и «Бет»)
-- Чек/Колл: тап (535, 2315). Фолд: (185, 2315). Бет/рейз: (880, 2315).
+- Чек/Колл: тап (535, 2315). Фолд: (185, 2315). Бет/рейз: (880, 2315) — в долях экрана.
 - Жёлтая сумма на кнопке колл = оппонент поставил -> зовём Клода.
 
 Использование: python claude_guard.py [--timeout N] [--interval 1.5]
@@ -18,9 +19,12 @@ SERIAL = '1cf5db29'
 BASE = r'C:\Users\Vlad\clubgg_bot'
 SHOTS = os.path.join(BASE, 'shots')
 
-BTN_CHECK = (535, 2315)   # «Чек» / «Колл»
-BTN_FOLD = (185, 2315)    # «Фолд»
-BTN_BET = (880, 2315)     # «Бет 33%» / пресет рейза
+# Точки тапа — в ДОЛЯХ экрана (сняты с эталона 1080x2400): у телефонов разная
+# высота экрана (1080x2400, 1080x2340), пиксельная точка бьёт мимо кнопки.
+REF_W, REF_H = 1080, 2400
+BTN_CHECK = (535 / REF_W, 2315 / REF_H)   # «Чек» / «Колл»
+BTN_FOLD = (185 / REF_W, 2315 / REF_H)    # «Фолд»
+BTN_BET = (880 / REF_W, 2315 / REF_H)     # «Бет 33%» / пресет рейза
 
 def grab():
     p = subprocess.run([ADB, '-s', SERIAL, 'exec-out', 'screencap', '-p'],
@@ -61,6 +65,11 @@ def yellow_in_zone(img, x0, x1, y0_frac=0.86, y1_frac=0.99):
 
 def tap(x, y):
     subprocess.run([ADB, '-s', SERIAL, 'shell', 'input', 'tap', str(x), str(y)], check=False)
+
+def point(img, frac):
+    """Доли экрана -> пиксели ФАКТИЧЕСКОГО кадра (он же экран телефона)."""
+    W, H = img.size
+    return int(round(frac[0] * W)), int(round(frac[1] * H))
 
 def ask_claude(img_path):
     p = subprocess.run([sys.executable, os.path.join(BASE, 'claude_act.py'), img_path],
@@ -116,24 +125,25 @@ def main():
             img.save(shot)
             if not has_call:
                 # ставок нет (кнопка «Чек», а не «Колл X») -> ЧЕК по центру
-                tap(*BTN_CHECK)
-                print('AUTO_CHECK at (535,2315)', flush=True)
+                pt = point(img, BTN_CHECK)
+                tap(*pt)
+                print(f'AUTO_CHECK at {pt}', flush=True)
                 sys.exit(0)
             # есть ставка -> зовём Клода
             decision = ask_claude(shot)
             print(f'CLAUDE: {json.dumps(decision, ensure_ascii=False)}', flush=True)
             action = decision.get('action', 'check')
             if action == 'fold':
-                tap(*BTN_FOLD)
+                tap(*point(img, BTN_FOLD))
                 print('TAP FOLD', flush=True)
             elif action == 'call':
-                tap(*BTN_CHECK)
+                tap(*point(img, BTN_CHECK))
                 print('TAP CALL', flush=True)
             elif action == 'raise':
-                tap(*BTN_BET)
+                tap(*point(img, BTN_BET))
                 print(f'TAP RAISE (raise_to={decision.get("raise_to_bb")})', flush=True)
             else:
-                tap(*BTN_CHECK)
+                tap(*point(img, BTN_CHECK))
                 print('TAP CHECK', flush=True)
             with open(os.path.join(BASE, 'claude_log.jsonl'), 'a', encoding='utf-8') as f:
                 f.write(json.dumps({**decision, 'ts': time.strftime('%H:%M:%S')}, ensure_ascii=False) + '\n')

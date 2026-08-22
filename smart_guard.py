@@ -5,13 +5,13 @@
 Признаки:
 - МОЙ ХОД: нижняя зона (y>0.86H) изменилась относительно базового кадра (появились кнопки)
 - СТАВКА ЕСТЬ: жёлтая сумма на кнопке колла («Колл 0.5 ББ» жёлтым) > 100 пикселей
-- Кнопка «Чек/Фолд»: фиксированная точка (283, 2315)
+- Кнопка «Чек/Фолд»: фиксированная точка (283, 2315) эталона 1080x2400 — тапаем её в долях экрана
 - Кнопка «Колл»: центр жёлтых пикселей
 
 Логика:
 1. Стабилизация базового кадра.
 2. Ждём diff нижней зоны > порога 2 кадра подряд (кнопки появились = мой ход).
-3. yellow < 100 -> АВТО-ЧЕК в (283,2315). yellow >= 100 -> NEED_DECISION (кадр + центр колла).
+3. yellow < 100 -> АВТО-ЧЕК в центр кнопки «Чек/Фолд». yellow >= 100 -> NEED_DECISION (кадр + центр колла).
 
 Использование: python smart_guard.py [--timeout N] [--interval 1.5] [--threshold 0.08]
 Выход: 0 = авто-чек, 1 = нужно решение, 3 = таймаут
@@ -22,7 +22,10 @@ from PIL import Image
 ADB = r'E:/down/platform-tools/platform-tools/adb.exe'
 SERIAL = '1cf5db29'
 SHOTS = r'C:\Users\Vlad\clubgg_bot\shots'
-CHECK_POINT = (283, 2315)  # кнопка «Чек/Фолд»
+# Точка тапа — в ДОЛЯХ экрана (снята с эталона 1080x2400): у телефонов разная
+# высота экрана (1080x2400, 1080x2340), пиксельная точка бьёт мимо кнопки.
+REF_W, REF_H = 1080, 2400
+CHECK_POINT = (283 / REF_W, 2315 / REF_H)  # кнопка «Чек/Фолд»
 
 def grab():
     p = subprocess.run([ADB, '-s', SERIAL, 'exec-out', 'screencap', '-p'],
@@ -63,6 +66,11 @@ def yellow_center(img):
 def tap(x, y):
     subprocess.run([ADB, '-s', SERIAL, 'shell', 'input', 'tap', str(x), str(y)], check=False)
 
+def point(img, frac):
+    """Доли экрана -> пиксели ФАКТИЧЕСКОГО кадра (он же экран телефона)."""
+    W, H = img.size
+    return int(round(frac[0] * W)), int(round(frac[1] * H))
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--timeout', type=int, default=0)
@@ -102,8 +110,9 @@ def main():
             yc, yn = yellow_center(img)
             print(f'[guard] кнопки появились! diff={d:.3f} yellow={yn}', flush=True)
             if yn < 100:
-                tap(*CHECK_POINT)
-                print(f'AUTO_CHECK at {CHECK_POINT}', flush=True)
+                pt = point(img, CHECK_POINT)
+                tap(*pt)
+                print(f'AUTO_CHECK at {pt}', flush=True)
                 sys.exit(0)
             else:
                 path = os.path.join(SHOTS, 'need_decision.png')
