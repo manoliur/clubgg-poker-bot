@@ -165,6 +165,7 @@ class Bot:
         self.history_path = history_path or config.HAND_HISTORY
         self.hand_id = 0
         self.raised_preflop = False     # мы уже поднимали на этом префлопе
+        self.reset_lines()              # что оппонент делал в этой раздаче
         self.last_hole = None
         self._tracked = None            # кадр, по которому уже искали границу раздачи
         self._empty_frames = 0          # сколько кадров подряд стол пуст (см. track_hand)
@@ -360,6 +361,7 @@ class Bot:
         self.raised_preflop = False
         self._bluff_key = self._bluff_last = None
         self._board_seen = False
+        self.reset_lines()
         if not self.opponent_memory:
             return
         try:
@@ -370,6 +372,60 @@ class Bot:
                 self.save_profiles(finished)
         except Exception as e:                    # цикл важнее статистики
             self.log(f'память оппонентов: раздача не закрыта ({type(e).__name__}: {e})')
+
+    # ---------- линия оппонента в раздаче ----------
+    def reset_lines(self):
+        """Новая раздача — забыть, что оппонент делал в прошлой."""
+        self._line_bet = {}          # улица -> была ли перед нами ставка
+        self._line_acted = {}        # улица -> что на ней сделали мы
+        self._line_aggressor = False  # на префлопе перед нами поднимали
+
+    def track_lines(self, state):
+        """Запомнить по кадру НАШЕГО хода, что оппонент успел сделать.
+
+        Дешёвая замена расчёту диапазона: перебирать чужие руки в игровом цикле
+        нельзя, а «поднял префлоп», «чекнул прошлую улицу» и «ставит третью
+        улицу подряд» видны прямо из состояний, которые бот и так читает, и
+        говорят о силе его руки почти то же самое.
+
+        Считается только на своём ходу: кнопки и сумма колла видны в кадре
+        именно тогда (тем же живёт opponents.HandObserver).
+        """
+        street = state.get('street')
+        if street not in opponents.STREETS:
+            return
+        if state.get('has_bet'):
+            self._line_bet[street] = True
+            to_call = state.get('to_call_bb')
+            if (street == 'preflop' and not self.raised_preflop
+                    and to_call is not None and to_call > opponents.PFR_MIN_CALL):
+                # колл дороже большого блайнда до нашего первого хода = кто-то поднял
+                self._line_aggressor = True
+        else:
+            self._line_bet.setdefault(street, False)
+
+    def opp_checked_before(self, street):
+        """Прошла ли предыдущая улица в два чека: нам не ставили, и мы сами чекнули.
+
+        Смотрим на последнюю улицу, где МЫ ходили: на улице без нашего хода
+        (бота запустили посреди раздачи) сказать нечего.
+        """
+        order = opponents.STREETS
+        if street not in order:
+            return False
+        for prev in reversed(order[:order.index(street)]):
+            if prev in self._line_acted:
+                return self._line_acted[prev] == 'check' and not self._line_bet.get(prev)
+        return False
+
+    def opponent_lines(self, state):
+        """Линия оппонента для стратегии. Пусто — флаг opponent_lines выключен."""
+        if not self.chart.settings.get('opponent_lines'):
+            return {}
+        return {'opp_aggressor': self._line_aggressor,
+                'opp_checked': self.opp_checked_before(state.get('street')),
+                'opp_bet_streets': sum(1 for s, bet in self._line_bet.items()
+                                       if bet and s != 'preflop')}
 
     # ---------- память оппонентов ----------
     def observe(self, state):
@@ -742,7 +798,7 @@ class Bot:
         self.refresh_settings()
         # свой рейз на префлопе стратегия видит только отсюда: по нему она
         # отличает ререйз оппонента от обычного открытия (см. decide_preflop)
-        state = {**state, 'hero_raised': self.raised_preflop}
+        state = {**state, 'hero_raised': self.raised_preflop, **self.opponent_lines(state)}
         if strategy.blocker_bluff_spot(state, self.chart, self.stack_bb):
             state = {**state, 'bluff_ok': self.bluff_ok(state)}
         return strategy.decide(state, profile=self.opponent_profile(state),
@@ -865,6 +921,7 @@ class Bot:
             # иначе пересевший игрок заводит себе второй профиль
             self.update_nicks(img, state)
 
+        self.track_lines(state)      # что оппонент успел сделать до нашего хода
         decision = self.decide(state)
         # свёрнутый столбец ставки: сначала раскрыть его шевроном, потом решать
         # заново по перерисованному кадру — одно «действие» бота из двух тапов
@@ -920,6 +977,8 @@ class Bot:
             'style': self.style,
             'flags': self.active_flags(),
             'think_s': 0.0,
+            # --- линия оппонента в этой раздаче (пусто, если флаг выключен) ---
+            **self.opponent_lines(state),
         }
         self.log(self.decision_line(state, note, action, reason, amount))
         if len(hole) < 2:
@@ -931,6 +990,7 @@ class Bot:
             self.screen.tap(*point)
         if state['street'] == 'preflop' and action == 'raise':
             self.raised_preflop = True   # дальше ставка перед нами — уже ререйз
+        self._line_acted[state['street']] = action   # по нему видно чек-чек улицы
         self.observer.note_action(action, state['street'])
         self.record(entry)
         self.actions += 1

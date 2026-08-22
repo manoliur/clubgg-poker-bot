@@ -25,6 +25,10 @@ from tests.bench import random_states, run  # noqa: E402
 N = 10000               # решений в прогоне (как в задании)
 REPEAT = 3              # лучшее из трёх: планировщик шумит
 CARDS_BUDGET = 1.5      # решение дороже разбора карт не больше чем в полтора раза
+FEATURES_BUDGET = 1.15  # понимание стола поверх старых правил — не больше +15%
+# Флаги «системы понимания стола»: с ними выключенными бот считает ровно то же,
+# что до неё, — на этом и строится замер «до/после» внутри одной сборки.
+UNDERSTANDING = ('kicker_grades', 'river_value_bet', 'opponent_lines')
 
 
 def best(fn, states, repeat=REPEAT):
@@ -72,6 +76,20 @@ class BenchTest(unittest.TestCase):
                         f'решение стоит {ratio:.2f} разбора карт '
                         f'({decide / len(self.postflop) * 1e6:.0f} мкс на решение) — '
                         f'в стратегии появился перебор')
+
+    def test_understanding_features_are_almost_free(self):
+        """Опасность доски, кикер и линии оппонента — таблицы и кэши, а не расчёт."""
+        off = st.DEFAULT_CHART.copy()
+        off.settings.update({k: False for k in UNDERSTANDING})
+        on = st.DEFAULT_CHART.copy()
+        on.settings.update({k: True for k in UNDERSTANDING})
+        before = best(lambda s: run(s, chart=off), self.postflop)
+        after = best(lambda s: run(s, chart=on), self.postflop)
+        ratio = after / before
+        self.assertLess(ratio, FEATURES_BUDGET,
+                        f'с пониманием стола решение стоит {ratio:.2f} прежнего '
+                        f'({after / len(self.postflop) * 1e6:.0f} мкс против '
+                        f'{before / len(self.postflop) * 1e6:.0f} мкс)')
 
     def test_the_same_spot_is_not_re_evaluated(self):
         """За ход стратегию спрашивают дважды (раскрытие столбца, no_raise) — разбор один."""

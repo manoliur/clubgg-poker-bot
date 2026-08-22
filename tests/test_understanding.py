@@ -5,12 +5,15 @@
 играет ровно как раньше — это здесь и проверяется наравне с самим поведением.
 """
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import hand_evaluator as he                 # noqa: E402
 import strategy as st                       # noqa: E402
+from main import Bot                        # noqa: E402
 
 
 def state(**kw):
@@ -201,6 +204,164 @@ class KickerGradeTest(unittest.TestCase):
         """Сильный кикер двигает порог, а не отменяет его: 70% банка — фолд."""
         d = self.call_price(['Ah', 'Kc'], 23.0)
         self.assertEqual(d['action'], 'fold', d['reason'])
+
+
+class OpponentLinesTest(unittest.TestCase):
+    """Линия оппонента в раздаче: кто поднимал, кто чекал, кто ставит третью улицу."""
+
+    BOARD = ['Ad', '9s', '2c']
+
+    def medium(self, to_call=6.0, chart=None, **lines):
+        """Топ-пара против ставки: цена 6ББ в банк 10 — 37.5%, порог 40%."""
+        s = state(hole=['Ah', 'Jc'], board=self.BOARD, street='turn', has_bet=True,
+                  to_call_bb=to_call, pot_bb=10.0, players=2, **lines)
+        return st.decide(s, chart=chart)
+
+    def test_aggressor_makes_the_medium_hand_fold(self):
+        quiet = self.medium()
+        vs_aggressor = self.medium(opp_aggressor=True)
+        self.assertEqual(quiet['action'], 'call', quiet['reason'])
+        self.assertEqual(vs_aggressor['action'], 'fold', vs_aggressor['reason'])
+        self.assertIn('агрессор префлопа', vs_aggressor['reason'])
+
+    def test_flag_off_ignores_the_line(self):
+        off = chart_with(opponent_lines=False)
+        d = self.medium(opp_aggressor=True, chart=off)
+        self.assertEqual(d['action'], 'call', d['reason'])
+        self.assertNotIn('агрессор', d['reason'])
+
+    def test_two_bet_streets_turn_a_strong_raise_into_a_call(self):
+        """Сет против ставки — рейз; но если оппонент бьёт третью улицу — колл."""
+        kw = dict(hole=['9h', '9c'], board=['9d', '5s', '2c', '7h'], street='turn',
+                  has_bet=True, to_call_bb=6.0, pot_bb=10.0, players=2)
+        usual = st.decide(state(**kw))
+        pressed = st.decide(state(opp_bet_streets=2, **kw))
+        self.assertEqual(usual['action'], 'raise', usual['reason'])
+        self.assertEqual(pressed['action'], 'call', pressed['reason'])
+        self.assertIn('ставит 2 улицы подряд', pressed['reason'])
+
+    def test_nuts_still_raise_under_pressure(self):
+        """«Осторожнее» — про сильную руку, а не про непобиваемую."""
+        d = st.decide(state(hole=['As', 'Ks'], board=['Qs', '9s', '2s', '7h'],
+                            street='turn', has_bet=True, to_call_bb=6.0, pot_bb=10.0,
+                            players=2, opp_bet_streets=3))
+        self.assertEqual(d['action'], 'raise', d['reason'])
+
+    def test_aggressor_gets_no_thin_value(self):
+        kw = dict(hole=['Kh', 'Qd'], board=['5s', '5d', 'Kc', '2h', '9c'],
+                  street='river', has_bet=False, pot_bb=20.0, players=2)
+        quiet = st.decide(state(**kw))
+        vs_aggressor = st.decide(state(opp_aggressor=True, **kw))
+        self.assertEqual(quiet['action'], 'raise', quiet['reason'])
+        self.assertEqual(vs_aggressor['action'], 'check', vs_aggressor['reason'])
+        self.assertIn('чек вместо тонкой ставки', vs_aggressor['reason'])
+
+    def test_check_check_frees_the_thin_value_again(self):
+        """Поднимал префлоп, но чекнул прошлую улицу — слабость показана, ставим."""
+        d = st.decide(state(hole=['Kh', 'Qd'], board=['5s', '5d', 'Kc', '2h', '9c'],
+                            street='river', has_bet=False, pot_bb=20.0, players=2,
+                            opp_aggressor=True, opp_checked=True))
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertIn('чек-чек', d['reason'])
+
+    def test_lines_are_read_from_the_state(self):
+        s = state(opp_aggressor=True, opp_checked=True, opp_bet_streets=2)
+        self.assertEqual(st.opponent_lines(s),
+                         {'aggressor': True, 'checked': True, 'bet_streets': 2})
+        off = dict(st.DEFAULT_SETTINGS, opponent_lines=False)
+        self.assertEqual(st.opponent_lines(s, off), st.EMPTY_LINES)
+        self.assertEqual(st.opponent_lines(state()), st.EMPTY_LINES)
+
+
+class StubScreen:
+    def grab(self):
+        return None
+
+    def tap(self, x, y):
+        pass
+
+
+class LineTrackingTest(unittest.TestCase):
+    """Бот сам считает линию оппонента по кадрам своего хода (main.Bot)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='clubgg_lines_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bot = Bot(StubScreen(), players_path=os.path.join(self.tmp, 'players.json'),
+                       log_path=os.path.join(self.tmp, 'bot.log'),
+                       history_path=os.path.join(self.tmp, 'hands.jsonl'))
+
+    def turn(self, street, has_bet=False, to_call=None, acted=None):
+        """Кадр нашего хода на улице + наш ход на ней (как это делает step)."""
+        self.bot.track_lines({'street': street, 'has_bet': has_bet, 'to_call_bb': to_call})
+        if acted:
+            self.bot._line_acted[street] = acted
+
+    def lines(self, street):
+        return self.bot.opponent_lines({'street': street})
+
+    def test_preflop_raise_marks_the_aggressor(self):
+        self.turn('preflop', has_bet=True, to_call=3.0, acted='call')
+        self.assertTrue(self.lines('flop')['opp_aggressor'])
+
+    def test_a_limp_is_not_a_raise(self):
+        """Колл в размер блайнда — это не поднятие (порог тот же, что у PFR)."""
+        self.turn('preflop', has_bet=True, to_call=1.0, acted='call')
+        self.assertFalse(self.lines('flop')['opp_aggressor'])
+
+    def test_our_own_raise_is_not_theirs(self):
+        self.bot.raised_preflop = True
+        self.turn('preflop', has_bet=True, to_call=6.0, acted='call')
+        self.assertFalse(self.lines('flop')['opp_aggressor'])
+
+    def test_unreadable_amount_does_not_invent_a_raise(self):
+        """Суммы в кадре нет — тайтоветь на выдумке нельзя."""
+        self.turn('preflop', has_bet=True, to_call=None, acted='call')
+        self.assertFalse(self.lines('flop')['opp_aggressor'])
+
+    def test_check_check_on_the_previous_street(self):
+        self.turn('flop', has_bet=False, acted='check')
+        self.assertTrue(self.lines('turn')['opp_checked'])
+
+    def test_our_own_bet_is_not_a_check_check(self):
+        self.turn('flop', has_bet=False, acted='raise')
+        self.assertFalse(self.lines('turn')['opp_checked'])
+
+    def test_a_bet_on_that_street_is_not_a_check_check(self):
+        self.turn('flop', has_bet=False, acted='check')
+        self.turn('flop', has_bet=True, to_call=5.0, acted='call')   # он поставил после чека
+        self.assertFalse(self.lines('turn')['opp_checked'])
+
+    def test_bet_streets_count_postflop_only(self):
+        self.turn('preflop', has_bet=True, to_call=3.0, acted='call')
+        self.turn('flop', has_bet=True, to_call=5.0, acted='call')
+        self.assertEqual(self.lines('flop')['opp_bet_streets'], 1)
+        self.turn('turn', has_bet=True, to_call=9.0, acted='call')
+        self.assertEqual(self.lines('turn')['opp_bet_streets'], 2)
+
+    def test_a_new_hand_forgets_the_line(self):
+        self.turn('preflop', has_bet=True, to_call=3.0, acted='call')
+        self.turn('flop', has_bet=True, to_call=5.0, acted='call')
+        self.bot.close_hand()
+        self.assertEqual(self.lines('turn'),
+                         {'opp_aggressor': False, 'opp_checked': False,
+                          'opp_bet_streets': 0})
+
+    def test_flag_off_sends_nothing_to_the_strategy(self):
+        self.bot.chart.settings['opponent_lines'] = False
+        self.turn('preflop', has_bet=True, to_call=3.0, acted='call')
+        self.assertEqual(self.lines('flop'), {})
+
+    def test_lines_reach_the_decision(self):
+        """Сквозь Bot.decide: линия доезжает до стратегии и меняет решение."""
+        self.turn('preflop', has_bet=True, to_call=3.0, acted='call')
+        s = {'hole': ['Ah', 'Jc'], 'board': ['Ad', '9s', '2c'], 'street': 'turn',
+             'has_bet': True, 'to_call_bb': 6.0, 'pot_bb': 10.0, 'players': 2,
+             'position': 'BB'}
+        self.bot.stack_bb = 100.0
+        d = self.bot.decide(s)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('агрессор префлопа', d['reason'])
 
 
 if __name__ == '__main__':

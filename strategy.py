@@ -136,6 +136,8 @@ DEFAULT_SETTINGS = {
     'position_aware': False,
     # --- кикер топ-пары (см. KICKER_PRICE_MULT) ---
     'kicker_grades': True,
+    # --- линии оппонента в раздаче (см. opponent_lines) ---
+    'opponent_lines': True,
     # --- тонкое велью на ривере (см. _thin_value) ---
     'river_value_bet': True,
     'river_value_pot': 0.55,      # 50-60% банка: столько платит вторая пара
@@ -189,7 +191,7 @@ STYLE_TITLES = {'tighty': 'Тайтовый', 'standard': 'Стандарт',
                 'aggressive': 'Агрессивный', 'loose': 'Лузовый'}
 # Переключатели «вкл/выкл» — панель пишет их в devices.json как true/false.
 FLAG_KEYS = ('bet_sizing', 'multiway_tight', 'short_stack_mode', 'blocker_bluff',
-             'position_aware', 'kicker_grades', 'river_value_bet')
+             'position_aware', 'kicker_grades', 'river_value_bet', 'opponent_lines')
 # Ключи настроек, которые панель может класть прямо в запись устройства.
 # 'aggression' исключён: в devices.json это ползунок-множитель, а не сама настройка.
 DEVICE_SETTING_KEYS = tuple(k for k in DEFAULT_SETTINGS if k != 'aggression')
@@ -207,6 +209,16 @@ KICKER_NOTE = {'strong': 'кикер A/K', 'medium': '', 'weak': 'кикер с�
 # Как называть опасность доски в причине решения (hand_evaluator.board_danger).
 DANGER_TITLES = {'safe': 'доска сухая', 'medium': 'доска средняя',
                  'danger': 'доска опасная'}
+
+# Линия оппонента в ЭТОЙ раздаче — то, что бот увидел своими глазами (главный
+# цикл, Bot.track_lines). Диапазонов бот не считает: перебор рук в игровом цикле
+# запрещён, а «поднял префлоп», «чекнул прошлую улицу» и «ставит третью улицу
+# подряд» видны прямо из наблюдённых состояний и говорят почти то же самое.
+EMPTY_LINES = {'aggressor': False, 'checked': False, 'bet_streets': 0}
+LINES_PRICE_MULT = 0.85     # против префлоп-агрессора средняя рука коллит тайтовее
+LINES_PRESSURE = 2          # ставки на стольких улицах подряд — оппонент представляет руку
+LINES_NOTE = {'aggressor': 'оппонент — агрессор префлопа',
+              'checked': 'оппонент слаб (чек-чек)'}
 CALL_MARGIN = 0.05          # запас: коллим, когда цена заметно ниже эквити
 BLIND_PRICE = 0.33          # цена колла, когда чисел банка нет (ставка ~полбанка)
 
@@ -912,7 +924,8 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
 # постфлоп
 # --------------------------------------------------------------------------
 def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-                    chart=None, no_raise=False, oop=None, bluff_ok=True, profile=None):
+                    chart=None, no_raise=False, oop=None, bluff_ok=True, profile=None,
+                    lines=None):
     """Решение после флопа с пометкой режима в причине (мультипот, короткий стек).
 
     Сам розыгрыш считает _postflop, здесь к причине дописывается, почему бот
@@ -920,6 +933,7 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
 
     profile — запись оппонента из players.json (та же, что у adjust_for_opponent):
     тонкое велью на ривере против агрессивного оппонента не ставится.
+    lines — что оппонент делал в ЭТОЙ раздаче (см. opponent_lines).
     """
     chart = chart or _ACTIVE
     st = chart.settings
@@ -927,7 +941,7 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
     short = is_short(stack_bb, st)
     decision = _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb,
                          players, chart, no_raise, multiway, short, oop, bluff_ok,
-                         profile)
+                         profile, lines)
     notes = []
     if multiway:
         notes.append(f'мультипот {players} игроков — играем тайтовее')
@@ -939,14 +953,14 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
 
 
 def _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-              chart, no_raise, multiway, short, oop, bluff_ok, profile=None):
+              chart, no_raise, multiway, short, oop, bluff_ok, profile=None, lines=None):
     """Розыгрыш после флопа. no_raise — рейз/ставка недоступны (живого пресета нет).
 
     Тогда сильная рука коллит вместо рейза, а полу-блеф отменяется: блефовать
     коллом нельзя, и решение остаётся за пот-оддсами.
     """
     spot = Spot(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-                chart, no_raise, multiway, short, oop, bluff_ok, profile)
+                chart, no_raise, multiway, short, oop, bluff_ok, profile, lines)
     return _answer_bet(spot) if has_bet else _lead(spot)
 
 
@@ -971,11 +985,12 @@ class Spot:
                  'pot_bb', 'stack_bb', 'players', 'no_raise', 'multiway', 'short',
                  'oop', 'bluff_ok', 'hu', 'cls', 'made', 'name', 'outs', 'draws',
                  'category', 'big_made', 'price', 'price_mult', 'showdown',
-                 'all_in', 'semi', 'kicker', 'kicker_mult', 'profile', 'agg', '_danger')
+                 'all_in', 'semi', 'kicker', 'kicker_mult', 'profile', 'agg', '_danger',
+                 'lines')
 
     def __init__(self, hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb,
                  players, chart, no_raise, multiway, short, oop, bluff_ok,
-                 profile=None):
+                 profile=None, lines=None):
         st = chart.settings
         self.chart, self.st = chart, st
         self.hole, self.board, self.street = hole, board, street
@@ -988,6 +1003,7 @@ class Spot:
         # --- активность оппонента ---
         self.profile = profile
         self.agg = opponent_agg(profile, st)
+        self.lines = lines if lines is not None else EMPTY_LINES
         self._danger = None                 # опасность доски — по требованию, см. danger()
 
         # --- сила руки ---
@@ -1046,6 +1062,20 @@ class Spot:
         """Оппонент бьёт по банку сам (agg из профиля выше порога), а не коллирует."""
         return self.agg is not None and self.agg > self.st['river_value_agg']
 
+    def lines_mult(self):
+        """Множитель порога цены по линии оппонента: против агрессора коллим тайтовее."""
+        return LINES_PRICE_MULT if self.lines['aggressor'] else 1.0
+
+    def lines_note(self):
+        """Линия оппонента словами — для причины решения. Пусто, когда сказать нечего."""
+        streets = self.lines['bet_streets']
+        if streets >= LINES_PRESSURE:
+            return f'оппонент ставит {streets} улицы подряд'
+        for key in ('checked', 'aggressor'):
+            if self.lines[key]:
+                return LINES_NOTE[key]
+        return ''
+
     def odds(self, equity=None):
         return _odds_note(self.price, self.showdown if equity is None else equity)
 
@@ -1056,7 +1086,8 @@ class Spot:
         по строке решения должно быть видно, ПОЧЕМУ порог сдвинулся, иначе
         разбирать живую раздачу по логу нельзя.
         """
-        parts = [p for p in (KICKER_NOTE.get(self.kicker, ''),) + extra if p]
+        parts = [p for p in (KICKER_NOTE.get(self.kicker, ''), self.lines_note()) + extra
+                 if p]
         return f' ({" | ".join(parts)})' if parts else ''
 
 
@@ -1074,11 +1105,15 @@ def _answer_bet(spot):
         if spot.no_raise:
             return _d('call', f'{name}: колл против алл-ина — '
                               f'{spot.odds()} (рейз недоступен)')
+        if made == 'strong' and spot.lines['bet_streets'] >= LINES_PRESSURE:
+            # оппонент бьёт по банку третью улицу подряд: сильная (но не
+            # непобиваемая) рука на рейз тут чаще нарывается на лучшую — коллим
+            return _d('call', f'{name}: колл вместо рейза{spot.context()}, {spot.odds()}')
         # при bet_sizing рейз натсом крупнее, без него — как раньше, cbet*1.5
         kind = made if st['bet_sizing'] else 'strong'
         return _raise_pot(f'{name}: рейз на велью', spot.pot_bb, spot.bet_frac(kind, mult=1.5))
     if made == 'medium':
-        cap = st['medium_max_price'] * spot.price_mult * spot.kicker_mult
+        cap = st['medium_max_price'] * spot.price_mult * spot.kicker_mult * spot.lines_mult()
         note = spot.context()
         if price is not None and price > cap:
             return _d('fold', f'{name}: средняя рука{note}, {spot.odds()} — фолд')
@@ -1200,6 +1235,10 @@ def _thin_value(spot):
     board = f'{DANGER_TITLES[level]} ({note})'
     if score >= st['river_value_danger']:
         return _d('check', f'{name}: {board} — чек вместо тонкой ставки')
+    if spot.lines['aggressor'] and not spot.lines['checked']:
+        # поднимал префлоп и с тех пор слабости не показал — его диапазон
+        # сильнее нашей средней руки, тонкая ставка соберёт рейз
+        return _d('check', f'{name}: {LINES_NOTE["aggressor"]} — чек вместо тонкой ставки')
     if spot.aggressive():
         return _d('check', f'{name}: оппонент агрессивный (agg {spot.agg:.1f}) — '
                            f'чек, тонкая ставка соберёт рейз')
@@ -1236,6 +1275,22 @@ def metric_ready(profile, metric, settings=None):
     if int(profile.get('hands') or 0) < int(st.get(key, DEFAULT_SETTINGS[key])):
         return False
     return any(int(profile.get(k) or 0) for k in PROFILE_DENOM[metric])
+
+
+def opponent_lines(state, settings=None):
+    """Линия оппонента в этой раздаче из состояния стола -> словарь EMPTY_LINES.
+
+    Ключи кладёт главный цикл (Bot.opponent_lines): 'opp_aggressor' — на
+    префлопе перед нами поднимали, 'opp_checked' — прошлая улица прошла в два
+    чека, 'opp_bet_streets' — на скольких улицах оппонент ставил или поднимал.
+    Флаг выключен — всегда EMPTY_LINES, и бот играет как раньше.
+    """
+    st = settings if settings is not None else DEFAULT_SETTINGS
+    if not st.get('opponent_lines'):
+        return EMPTY_LINES
+    return {'aggressor': bool(state.get('opp_aggressor')),
+            'checked': bool(state.get('opp_checked')),
+            'bet_streets': int(state.get('opp_bet_streets') or 0)}
 
 
 def opponent_agg(profile, settings=None):
@@ -1316,7 +1371,8 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
             decision = decide_postflop(hole, board, street, has_bet, to_call, pot,
                                        stack_bb, players, chart, no_raise=no_raise,
                                        oop=oop, bluff_ok=state.get('bluff_ok', True),
-                                       profile=profile)
+                                       profile=profile,
+                                       lines=opponent_lines(state, chart.settings))
             made = he.hand_class(hole, board)['made']
     except (he.BadCard, ValueError) as e:
         return _d('check' if not has_bet else 'fold', f'ошибка разбора карт: {e}')
