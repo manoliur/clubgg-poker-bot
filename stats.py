@@ -250,8 +250,9 @@ def aggregate(hands, since=None, bb_value=BB_VALUE_DEFAULT):
     best = max((h['delta_bb'] for h in wins), default=0.0)
     worst = min((h['delta_bb'] for h in losses), default=0.0)
     return {
-        'hands': total,
-        'folded': len(folded),
+        'hands': len(all_rows),       # всего раздач с результатом
+        'played': total,              # из них сыграно (было добровольное вложение)
+        'folded': len(folded),        # не сыграно (фолд на префлопе без вложений)
         'wins': len(wins),
         'losses': len(losses),
         'pushes': total - len(wins) - len(losses),

@@ -100,7 +100,8 @@ class DeltaTest(unittest.TestCase):
             rec(4, 50.0, action='call', street='preflop'),
         ])
         agg = stats.aggregate(hands)
-        self.assertEqual(agg['hands'], 2)          # сыграно: win + loss
+        self.assertEqual(agg['hands'], 3)          # всего: 2 сыгранных + 1 не сыграно
+        self.assertEqual(agg['played'], 2)         # сыграно: win + loss
         self.assertEqual(agg['folded'], 1)
         self.assertEqual(agg['wins'], 1)
         self.assertEqual(agg['losses'], 1)
