@@ -313,6 +313,15 @@ class PanelTest(unittest.TestCase):
                                os.path.join(self.tmp, 'нет.json')):
             self.assertEqual(self.mgr.opponents(), [])
 
+    def test_every_switch_and_slider_has_a_hint(self):
+        """Значок «?» есть у каждой галочки: новая настройка без объяснения — не настройка."""
+        for key, _title in self.panel.FLAGS + self.panel.BOT_FLAGS:
+            with self.subTest(key=key):
+                self.assertIn(key, self.panel.TIPS)
+        for key in self.panel.SLIDER_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(key, self.panel.TIPS)
+
     def test_styles_for_the_dropdown(self):
         styles = self.mgr.styles()
         self.assertEqual(set(styles), set(st.STYLE_PRESETS))
