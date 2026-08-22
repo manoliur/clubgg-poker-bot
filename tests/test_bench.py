@@ -86,6 +86,15 @@ class BenchTest(unittest.TestCase):
             st.decide({**s, 'no_raise': True})
         self.assertEqual(len(he._CLASS_CACHE), size)
 
+    def test_board_danger_is_counted_once_per_street(self):
+        """Опасность доски зависит только от доски — раз на улицу, дальше кэш."""
+        board = ['Ad', '9s', '2c', '7h', '3d']
+        he._DANGER_CACHE.clear()
+        first = he.board_danger(board)
+        for _ in range(100):
+            self.assertIs(he.board_danger(board), first)
+        self.assertEqual(len(he._DANGER_CACHE), 1)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

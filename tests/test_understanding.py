@@ -9,6 +9,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import hand_evaluator as he                 # noqa: E402
 import strategy as st                       # noqa: E402
 
 
@@ -28,6 +29,138 @@ def chart_with(**settings):
 # профили оппонента с набранной статистикой (metric_ready берёт min_hands_agg=80)
 PASSIVE = {'hands': 120, 'agg': 1.2, 'agg_bets': 30, 'agg_calls': 25}
 AGGRO = {'hands': 120, 'agg': 3.4, 'agg_bets': 51, 'agg_calls': 15}
+
+
+class BoardDangerTest(unittest.TestCase):
+    """Опасность доски на известных досках: сухая — 0, мокрая — почти единица."""
+
+    def test_dry_rainbow_board_is_safe(self):
+        for board in (['Kh', '7d', '2c'], ['Ah', '7d', '2c', '4s', '9h'],
+                      ['Kh', '9h', '2c', '5d', 'Jc']):
+            with self.subTest(board=board):
+                self.assertEqual(he.danger_level(board), 'safe')
+
+    def test_three_of_a_suit_is_a_flush_risk(self):
+        self.assertEqual(he.danger_level(['As', 'Ks', 'Qs']), 'danger')
+        self.assertGreaterEqual(he.danger_score(['2s', '8s', 'Qs', '7d']), 0.40)
+
+    def test_four_of_a_suit_is_worse_than_three(self):
+        self.assertGreater(he.danger_score(['2s', '8s', 'Qs', '4s']),
+                           he.danger_score(['2s', '8s', 'Qs', '4d']))
+
+    def test_connected_board_beats_a_disconnected_one(self):
+        self.assertGreater(he.danger_score(['Js', 'Th', '9c']),
+                           he.danger_score(['Js', '6h', '2c']))
+        # 4 к стриту — оппоненту хватит одной карты
+        self.assertEqual(he.danger_level(['Qd', 'Jc', 'Th', '9s']), 'danger')
+
+    def test_paired_board_is_more_dangerous_than_unpaired(self):
+        self.assertGreater(he.danger_score(['Kh', 'Kd', '4s']),
+                           he.danger_score(['Kh', '8d', '4s']))
+        self.assertEqual(he.danger_level(['Kh', 'Kd', '4s']), 'medium')
+
+    def test_two_pair_and_trips_are_worse_than_one_pair(self):
+        one = he.danger_score(['Kh', 'Kd', '4s', '9c'])
+        self.assertGreater(he.danger_score(['Kh', 'Kd', '4s', '4c']), one)
+        self.assertGreater(he.danger_score(['Kh', 'Kd', 'Kc', '4c']), one)
+        self.assertEqual(he.danger_level(['Kh', 'Kd', 'Kc', '4c']), 'danger')
+
+    def test_the_wettest_board_maxes_out(self):
+        self.assertEqual(he.danger_score(['Ah', 'Kh', 'Qh', 'Jh', 'Th']), 1.0)
+        self.assertEqual(he.danger_level(['9h', '8h', '7h']), 'danger')
+
+    def test_score_stays_in_range_and_is_cached(self):
+        he._DANGER_CACHE.clear()
+        board = ['9h', '8h', '7h', '2c']
+        first = he.board_danger(board)
+        self.assertTrue(0.0 <= first[0] <= 1.0)
+        self.assertIs(he.board_danger(board), first)     # тот же объект — кэш
+        self.assertEqual(len(he._DANGER_CACHE), 1)
+
+    def test_no_board_is_safe(self):
+        self.assertEqual(he.danger_score([]), 0.0)
+        self.assertEqual(he.danger_level([None]), 'safe')
+
+
+class RiverValueBetTest(unittest.TestCase):
+    """Живой кейс: оппонент тянул флеш, не добрал и чекнул — а бот молча чекал в ответ.
+
+    Доска 5-5-K-2-9: у нас KQ, то есть «две пары K/5», где пятёрки общие. Класс
+    силы — medium, и раньше такая рука всегда играла «контроль банка».
+    """
+
+    DRY = ['5s', '5d', 'Kc', '2h', '9c']            # флеш не пришёл: масти разные
+    WET = ['5s', '5d', 'Kc', '2s', '9s']            # три пики: флеш возможен
+
+    def river(self, board=None, hole=('Kh', 'Qd'), profile=None, chart=None, **kw):
+        base = {'street': 'river', 'has_bet': False, 'pot_bb': 20.0, 'players': 2}
+        base.update(kw)
+        s = state(hole=list(hole), board=list(board or self.DRY), **base)
+        return st.decide(s, profile=profile, chart=chart)
+
+    def test_two_pair_bets_thin_value_on_a_dry_board(self):
+        d = self.river()
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertAlmostEqual(d['pot_frac'], st.DEFAULT_SETTINGS['river_value_pot'])
+        self.assertAlmostEqual(d['amount_bb'], 11.0)
+        self.assertIn('тонкий вэлью', d['reason'])
+        self.assertIn('две пары доминируют', d['reason'])
+
+    def test_size_is_half_the_pot(self):
+        """50-60% банка: столько платит вторая пара, больше — только флеш."""
+        d = self.river()
+        self.assertTrue(0.50 <= d['pot_frac'] <= 0.60, d['pot_frac'])
+
+    def test_dangerous_board_checks_instead(self):
+        d = self.river(board=self.WET)
+        self.assertEqual(d['action'], 'check', d['reason'])
+        self.assertIn('доска опасная', d['reason'])
+        self.assertIn('3 в масть', d['reason'])
+
+    def test_aggressive_opponent_gets_a_check(self):
+        """Против агрессора тонкая ставка собирает не колл, а рейз."""
+        d = self.river(profile=AGGRO)
+        self.assertEqual(d['action'], 'check', d['reason'])
+        self.assertIn('оппонент агрессивный', d['reason'])
+
+    def test_passive_opponent_is_value_bet(self):
+        d = self.river(profile=PASSIVE)
+        self.assertEqual(d['action'], 'raise', d['reason'])
+
+    def test_thin_bet_needs_a_heads_up_pot(self):
+        d = self.river(players=3)
+        self.assertEqual(d['action'], 'check', d['reason'])
+
+    def test_top_pair_needs_a_kicker(self):
+        """Топ-пара с кикером от десятки ставит, с мелким — контроль банка."""
+        board = ['Ad', '9s', '2c', '7h', '3d']
+        good = self.river(board=board, hole=('Ah', 'Jc'))
+        bad = self.river(board=board, hole=('Ah', '4c'))
+        self.assertEqual(good['action'], 'raise', good['reason'])
+        self.assertIn('топ-пара держит', good['reason'])
+        self.assertEqual(bad['action'], 'check', bad['reason'])
+        self.assertIn('контроль банка', bad['reason'])
+
+    def test_flag_off_keeps_the_old_check(self):
+        off = chart_with(river_value_bet=False, kicker_grades=False)
+        d = self.river(chart=off)
+        self.assertEqual(d['action'], 'check', d['reason'])
+        self.assertIn('контроль банка', d['reason'])
+
+    def test_turn_is_only_for_a_strong_kicker(self):
+        """На терне тонко ставим лишь топ-парой с A/K: впереди ещё карта."""
+        turn = ['Ad', '9s', '2c', '7h']
+        strong = self.river(board=turn, hole=('Ah', 'Kc'), street='turn')
+        medium = self.river(board=turn, hole=('Ah', 'Jc'), street='turn')
+        self.assertEqual(strong['action'], 'raise', strong['reason'])
+        self.assertEqual(medium['action'], 'check', medium['reason'])
+
+    def test_strong_two_pair_still_bets_the_usual_size(self):
+        """Обычные две пары — не «тонкое велью», а прежняя ставка на велью."""
+        d = self.river(board=['Ad', '9s', '2c', '7h', '3d'], hole=('Ah', '9c'))
+        self.assertEqual(d['action'], 'raise', d['reason'])
+        self.assertIn('ставка на велью', d['reason'])
+        self.assertAlmostEqual(d['pot_frac'], st.DEFAULT_SETTINGS['cbet_pot'])
 
 
 class KickerGradeTest(unittest.TestCase):

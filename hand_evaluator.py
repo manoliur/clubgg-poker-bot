@@ -251,6 +251,111 @@ def equity_from_outs(outs, street):
 
 
 # --------------------------------------------------------------------------
+# опасность доски
+# --------------------------------------------------------------------------
+# Насколько доска сама по себе угрожает нашей одной паре или двум парам. Считается
+# по трём простым признакам — таблицами, без перебора чужих рук:
+#
+#   масть      3 карты одной масти -> флеш возможен, 4+ -> максимум риска;
+#   связность  сколькими пятёрками подряд можно собрать стрит (окна рангов);
+#   спаренность пара на доске бьёт нашу пару трипсом, две пары/трипс — тем более.
+#
+# Числа подобраны так, чтобы «сухая» доска (K-7-2 разномастная) давала 0, а
+# мокрая (9-8-7 в одну масть) — почти единицу. Опасность зависит ТОЛЬКО от
+# доски, поэтому считается раз на улицу и кэшируется.
+DANGER_SAFE = 0.25          # ниже — доска сухая
+DANGER_HIGH = 0.40          # выше или равно — опасная: столько стоят три карты одной масти
+_FLUSH_DANGER = {3: 0.40, 4: 0.60, 5: 0.60}
+_STRAIGHT_READY = 0.50      # 4 карты в одном окне: оппоненту хватит одной
+_STRAIGHT_BASE = 0.20       # 3 карты в окне: стрит возможен, добрать надо две
+_STRAIGHT_WAY = 0.05        # прибавка за каждое лишнее окно (доска связная)
+_STRAIGHT_MAX = 0.40
+_PAIR_DANGER = 0.25
+_TWO_PAIR_DANGER = 0.50     # две пары или трипс на доске
+_DANGER_CACHE = {}
+_DANGER_CACHE_MAX = 512
+
+
+def _straight_windows(values):
+    """(в скольких пятёрках подряд лежит 3+ карт доски, максимум карт в одной).
+
+    Окно — пять подряд идущих рангов (A-2-3-4-5 ... 10-J-Q-K-A). Три карты доски
+    в одном окне значит, что оппонент собирает стрит двумя своими картами,
+    четыре — что ему хватит одной.
+    """
+    uniq = set(values)
+    if 14 in uniq:
+        uniq.add(1)                      # колесо A-2-3-4-5
+    ways = best = 0
+    for high in range(5, 15):
+        inside = sum(1 for i in range(5) if high - i in uniq)
+        if inside >= 3:
+            ways += 1
+        if inside > best:
+            best = inside
+    return ways, best
+
+
+def board_danger(board):
+    """Опасность доски -> (score 0.0..1.0, 'safe'/'medium'/'danger', пояснение).
+
+    Кэшируется по картам: внутри улицы доска не меняется, а спрашивают её на
+    каждом кадре.
+    """
+    cards = [c for c in board if c]
+    key = tuple(cards)
+    hit = _DANGER_CACHE.get(key)
+    if hit is not None:
+        return hit
+    score, notes = 0.0, []
+    if cards:
+        parsed = parse_cards(cards)
+        suits, counts = {}, {}
+        for v, s in parsed:
+            suits[s] = suits.get(s, 0) + 1
+            counts[v] = counts.get(v, 0) + 1
+
+        top_suit = max(suits.values())
+        if top_suit >= 3:
+            score += _FLUSH_DANGER[min(top_suit, 5)]
+            notes.append(f'{top_suit} в масть')
+
+        ways, best = _straight_windows(counts)
+        if best >= 4:
+            score += _STRAIGHT_READY
+            notes.append('4 к стриту')
+        elif best == 3:
+            score += min(_STRAIGHT_MAX, _STRAIGHT_BASE + _STRAIGHT_WAY * (ways - 1))
+            notes.append('связка' + (f' ({ways} захода на стрит)' if ways > 1 else ''))
+
+        pairs = sorted((v for v, c in counts.items() if c >= 2), reverse=True)
+        if pairs and (len(pairs) >= 2 or max(counts.values()) >= 3):
+            score += _TWO_PAIR_DANGER
+            notes.append('трипс на доске' if max(counts.values()) >= 3 else 'две пары на доске')
+        elif pairs:
+            score += _PAIR_DANGER
+            notes.append(f'пара {VALUE_RANK[pairs[0]]} на доске')
+
+    score = round(min(score, 1.0), 3)
+    level = 'safe' if score < DANGER_SAFE else ('danger' if score >= DANGER_HIGH else 'medium')
+    out = (score, level, ', '.join(notes) or 'сухая доска')
+    if len(_DANGER_CACHE) >= _DANGER_CACHE_MAX:
+        _DANGER_CACHE.clear()
+    _DANGER_CACHE[key] = out
+    return out
+
+
+def danger_score(board):
+    """Опасность доски числом 0.0 (сухая) .. 1.0 (мокрая). См. board_danger."""
+    return board_danger(board)[0]
+
+
+def danger_level(board):
+    """Опасность доски словом: 'safe' / 'medium' / 'danger'. См. board_danger."""
+    return board_danger(board)[1]
+
+
+# --------------------------------------------------------------------------
 # сила готовой руки по рангу составляющих карт
 # --------------------------------------------------------------------------
 # Флеш и стрит — ещё не натс: значение имеет ранг НАШЕЙ карты в комбинации.

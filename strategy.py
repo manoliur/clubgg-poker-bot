@@ -136,6 +136,11 @@ DEFAULT_SETTINGS = {
     'position_aware': False,
     # --- кикер топ-пары (см. KICKER_PRICE_MULT) ---
     'kicker_grades': True,
+    # --- тонкое велью на ривере (см. _thin_value) ---
+    'river_value_bet': True,
+    'river_value_pot': 0.55,      # 50-60% банка: столько платит вторая пара
+    'river_value_danger': 0.40,   # доска опаснее (3 в масть, спарена) — чек
+    'river_value_agg': 2.5,       # оппонент агрессивнее — чек: тонкая ставка соберёт рейз
     # --- сколько рук нужно метрике профиля, чтобы её применять (metric_ready) ---
     'min_hands_vpip': MIN_PROFILE_HANDS,
     'min_hands_pfr': MIN_PROFILE_PFR,
@@ -184,7 +189,7 @@ STYLE_TITLES = {'tighty': 'Тайтовый', 'standard': 'Стандарт',
                 'aggressive': 'Агрессивный', 'loose': 'Лузовый'}
 # Переключатели «вкл/выкл» — панель пишет их в devices.json как true/false.
 FLAG_KEYS = ('bet_sizing', 'multiway_tight', 'short_stack_mode', 'blocker_bluff',
-             'position_aware', 'kicker_grades')
+             'position_aware', 'kicker_grades', 'river_value_bet')
 # Ключи настроек, которые панель может класть прямо в запись устройства.
 # 'aggression' исключён: в devices.json это ползунок-множитель, а не сама настройка.
 DEVICE_SETTING_KEYS = tuple(k for k in DEFAULT_SETTINGS if k != 'aggression')
@@ -199,6 +204,9 @@ SHOWDOWN_EQUITY = {'nuts': 0.85, 'strong': 0.65, 'medium': 0.45, 'weak': 0.30}
 # Класс силы (made) остаётся прежним — меняется только цена.
 KICKER_PRICE_MULT = {'strong': 1.2, 'medium': 1.0, 'weak': 0.85}
 KICKER_NOTE = {'strong': 'кикер A/K', 'medium': '', 'weak': 'кикер слабый'}
+# Как называть опасность доски в причине решения (hand_evaluator.board_danger).
+DANGER_TITLES = {'safe': 'доска сухая', 'medium': 'доска средняя',
+                 'danger': 'доска опасная'}
 CALL_MARGIN = 0.05          # запас: коллим, когда цена заметно ниже эквити
 BLIND_PRICE = 0.33          # цена колла, когда чисел банка нет (ставка ~полбанка)
 
@@ -904,18 +912,22 @@ def decide_preflop(hole, position, players, has_bet, to_call_bb, pot_bb, stack_b
 # постфлоп
 # --------------------------------------------------------------------------
 def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-                    chart=None, no_raise=False, oop=None, bluff_ok=True):
+                    chart=None, no_raise=False, oop=None, bluff_ok=True, profile=None):
     """Решение после флопа с пометкой режима в причине (мультипот, короткий стек).
 
     Сам розыгрыш считает _postflop, здесь к причине дописывается, почему бот
     сыграл не как обычно, — чтобы это было видно в логе панели.
+
+    profile — запись оппонента из players.json (та же, что у adjust_for_opponent):
+    тонкое велью на ривере против агрессивного оппонента не ставится.
     """
     chart = chart or _ACTIVE
     st = chart.settings
     multiway = bool(st['multiway_tight'] and players is not None and players >= 3)
     short = is_short(stack_bb, st)
     decision = _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb,
-                         players, chart, no_raise, multiway, short, oop, bluff_ok)
+                         players, chart, no_raise, multiway, short, oop, bluff_ok,
+                         profile)
     notes = []
     if multiway:
         notes.append(f'мультипот {players} игроков — играем тайтовее')
@@ -927,14 +939,14 @@ def decide_postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, 
 
 
 def _postflop(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-              chart, no_raise, multiway, short, oop, bluff_ok):
+              chart, no_raise, multiway, short, oop, bluff_ok, profile=None):
     """Розыгрыш после флопа. no_raise — рейз/ставка недоступны (живого пресета нет).
 
     Тогда сильная рука коллит вместо рейза, а полу-блеф отменяется: блефовать
     коллом нельзя, и решение остаётся за пот-оддсами.
     """
     spot = Spot(hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb, players,
-                chart, no_raise, multiway, short, oop, bluff_ok)
+                chart, no_raise, multiway, short, oop, bluff_ok, profile)
     return _answer_bet(spot) if has_bet else _lead(spot)
 
 
@@ -959,10 +971,11 @@ class Spot:
                  'pot_bb', 'stack_bb', 'players', 'no_raise', 'multiway', 'short',
                  'oop', 'bluff_ok', 'hu', 'cls', 'made', 'name', 'outs', 'draws',
                  'category', 'big_made', 'price', 'price_mult', 'showdown',
-                 'all_in', 'semi', 'kicker', 'kicker_mult')
+                 'all_in', 'semi', 'kicker', 'kicker_mult', 'profile', 'agg', '_danger')
 
     def __init__(self, hole, board, street, has_bet, to_call_bb, pot_bb, stack_bb,
-                 players, chart, no_raise, multiway, short, oop, bluff_ok):
+                 players, chart, no_raise, multiway, short, oop, bluff_ok,
+                 profile=None):
         st = chart.settings
         self.chart, self.st = chart, st
         self.hole, self.board, self.street = hole, board, street
@@ -971,6 +984,11 @@ class Spot:
         self.no_raise, self.multiway, self.short = no_raise, multiway, short
         self.oop, self.bluff_ok = oop, bluff_ok
         self.hu = players is not None and players <= 2
+
+        # --- активность оппонента ---
+        self.profile = profile
+        self.agg = opponent_agg(profile, st)
+        self._danger = None                 # опасность доски — по требованию, см. danger()
 
         # --- сила руки ---
         cls = he.hand_class(hole, board)
@@ -1013,6 +1031,20 @@ class Spot:
         return self.chart.bet_frac(kind, self.street, multiway=self.multiway,
                                    short=self.short if short is None else short,
                                    mult=mult)
+
+    def danger(self):
+        """Опасность доски (score, level, пояснение) — считается раз и запоминается.
+
+        Лениво: до тонкого велью на ривере доходит меньшая часть решений, а
+        считать доску в каждом — лишняя работа в игровом цикле.
+        """
+        if self._danger is None:
+            self._danger = he.board_danger(self.board)
+        return self._danger
+
+    def aggressive(self):
+        """Оппонент бьёт по банку сам (agg из профиля выше порога), а не коллирует."""
+        return self.agg is not None and self.agg > self.st['river_value_agg']
 
     def odds(self, equity=None):
         return _odds_note(self.price, self.showdown if equity is None else equity)
@@ -1134,7 +1166,47 @@ def _lead_medium(spot):
     if street == 'flop' or (spot.short and street == 'turn'):
         return _raise_pot(f'{name}: конт-бет', spot.pot_bb,
                           spot.bet_frac('medium', short=spot.short))
+    thin = _thin_value(spot)
+    if thin is not None:
+        return thin
     return _d('check', f'{name}: контроль банка на {street}')
+
+
+def _thin_value(spot):
+    """Тонкое велью средней рукой на терне/ривере. None — правило не про эту руку.
+
+    Живая ситуация, ради которой правило и появилось: хедз-ап, оппонент всю
+    дорогу тянул флеш, не добрал и чекнул ривер, у нас две пары — бот чекал
+    «контроль банка» и не забирал ставку, которую платит любая вторая пара.
+
+    Ставим, только когда сходится вся строка матрицы: улица (терн — лишь с
+    сильным кикером, ривер — и с двумя парами), игроков двое, рука дотягивает
+    до велью, доска не опасная и оппонент не агрессивный. Опасная доска или
+    агрессор — чек: тонкая ставка там собирает не колл, а рейз, и мы платим
+    вместо того, чтобы получать.
+    """
+    st, street, name = spot.st, spot.street, spot.name
+    if not spot.hu or street not in ('turn', 'river'):
+        return None
+    two_pair = spot.category == he.TWO_PAIR
+    # топ-пара с кикером A/K стоит велью и на терне, две пары и топ-пара с
+    # кикером от десятки — на ривере, где добирать оппоненту больше нечего
+    by_kicker = st['kicker_grades'] and spot.kicker == 'strong'
+    by_river = (street == 'river' and st['river_value_bet']
+                and (two_pair or spot.kicker in ('strong', 'medium')))
+    if not (by_kicker or by_river):
+        return None
+    score, level, note = spot.danger()
+    board = f'{DANGER_TITLES[level]} ({note})'
+    if score >= st['river_value_danger']:
+        return _d('check', f'{name}: {board} — чек вместо тонкой ставки')
+    if spot.aggressive():
+        return _d('check', f'{name}: оппонент агрессивный (agg {spot.agg:.1f}) — '
+                           f'чек, тонкая ставка соберёт рейз')
+    hand = 'две пары доминируют' if two_pair else 'топ-пара держит'
+    frac = round(min(st['river_value_pot'] * st['aggression'], 1.0), 3)
+    return _raise_pot(f'{name}: тонкий вэлью — {hand}' + spot.context(board),
+                      spot.pot_bb, frac)
 
 
 def _bet_size(pot_bb, fraction):
@@ -1164,6 +1236,18 @@ def metric_ready(profile, metric, settings=None):
     if int(profile.get('hands') or 0) < int(st.get(key, DEFAULT_SETTINGS[key])):
         return False
     return any(int(profile.get(k) or 0) for k in PROFILE_DENOM[metric])
+
+
+def opponent_agg(profile, settings=None):
+    """Агрессия оппонента из профиля (постфлоп: ставки к коллам) или None.
+
+    None — не «оппонент пассивный», а «наблюдений мало»: порог metric_ready тот
+    же, что у остальных правок по профилю, иначе бот считал бы агрессором
+    любого, кто поставил один раз за три раздачи.
+    """
+    if not profile or not metric_ready(profile, 'agg', settings):
+        return None
+    return float(profile.get('agg') or 0.0)
 
 
 def adjust_for_opponent(decision, profile, made, settings=None):
@@ -1231,7 +1315,8 @@ def decide(state, profile=None, stack_bb=100.0, chart=None):
             oop = state.get('first_to_act') == 'me'
             decision = decide_postflop(hole, board, street, has_bet, to_call, pot,
                                        stack_bb, players, chart, no_raise=no_raise,
-                                       oop=oop, bluff_ok=state.get('bluff_ok', True))
+                                       oop=oop, bluff_ok=state.get('bluff_ok', True),
+                                       profile=profile)
             made = he.hand_class(hole, board)['made']
     except (he.BadCard, ValueError) as e:
         return _d('check' if not has_bet else 'fold', f'ошибка разбора карт: {e}')
