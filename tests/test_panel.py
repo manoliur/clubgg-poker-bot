@@ -431,5 +431,184 @@ class PanelTest(unittest.TestCase):
         self.assertIn('--serial', cmd)
 
 
+class StatsApiTest(unittest.TestCase):
+    """Вкладка «Статистика»: /api/stats, фишки и группы галочек."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='clubgg_stats_api_')
+        self.path = os.path.join(self.tmp, 'devices.json')
+        self.history = os.path.join(self.tmp, 'hand_history.jsonl')
+        import panel
+        import stats
+        self.panel, self.stats = panel, stats
+        patcher = mock.patch.object(panel, 'DEVICES_FILE', self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mgr = panel.BotManager()
+        self.mgr.history = stats.History(self.history)
+        self.serial = self.mgr.devices[0]['serial']
+
+    def write_hands(self, *stacks):
+        """История: раздача на каждый стек входа (как её пишет бот)."""
+        with open(self.history, 'w', encoding='utf-8') as f:
+            for i, stack in enumerate(stacks):
+                f.write(json.dumps({'hand_id': i + 1, 'stack_bb': stack,
+                                    'ts': '2026-08-22 12:00:00', 'street': 'preflop',
+                                    'action': 'call', 'hole': ['Ah', 'Kd'],
+                                    'reason': 'сильная рука'}) + '\n')
+
+    def stats_for(self, serial=None):
+        with mock.patch.object(self.mgr, 'adb_online', return_value=[]):
+            return self.mgr.stats(serial or self.serial)
+
+    def test_stats_report_chips_not_just_bb(self):
+        self.write_hands(50.0, 55.0, 53.0)
+        self.mgr.save_config(self.serial, {'bb_value': 20})
+        out = self.stats_for()
+        allt = next(p for p in out['periods'] if p['key'] == 'all')
+        self.assertEqual(allt['hands'], 2)
+        self.assertEqual(allt['pl_bb'], 3.0)
+        self.assertEqual(allt['pl_chips'], 60, '3 ББ по 20 фишек')
+        self.assertEqual(out['bb_value'], 20.0)
+
+    def test_bb_value_changes_every_sum(self):
+        self.write_hands(50.0, 55.0)
+        self.mgr.save_config(self.serial, {'bb_value': 50})
+        out = self.stats_for()
+        self.assertEqual(out['bb_value'], 50.0)
+        self.assertEqual(out['chart'][0]['stack'], 2500, '50 ББ по 50 фишек')
+
+    def test_bb_value_defaults_to_twenty(self):
+        self.assertEqual(self.stats_for()['bb_value'], self.stats.BB_VALUE_DEFAULT)
+
+    def test_bb_value_is_saved_and_nonsense_is_ignored(self):
+        self.mgr.save_config(self.serial, {'bb_value': 25})
+        with open(self.path, encoding='utf-8') as f:
+            self.assertEqual(json.load(f)[0]['bb_value'], 25)
+        for bad in ('много', 0, -1, 10 ** 9):
+            self.mgr.save_config(self.serial, {'bb_value': bad})
+            self.assertEqual(self.mgr.device(self.serial)['bb_value'], 25,
+                             'кривое значение не затирает прежнее')
+
+    def test_the_live_hand_is_the_last_decision(self):
+        self.write_hands(50.0, 48.0)
+        live = self.stats_for()['live']
+        self.assertEqual(live['hand_id'], 2)
+        self.assertEqual(live['hole'], ['Ah', 'Kd'])
+        self.assertEqual(live['stack_chips'], 960)
+        self.assertIn('сильная', live['reason'])
+
+    def test_without_a_start_the_session_period_is_unknown(self):
+        self.write_hands(50.0, 55.0, 53.0)
+        session = next(p for p in self.stats_for()['periods'] if p['key'] == 'session')
+        self.assertTrue(session['unknown'], 'бот не запускался — цифр за игру нет')
+
+    def test_start_opens_a_session_for_the_stats(self):
+        self.write_hands(50.0, 55.0, 53.0)
+        with mock.patch.object(self.panel.subprocess, 'Popen') as popen, \
+             mock.patch.object(self.panel.subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+            popen.return_value = mock.Mock(pid=4242)
+            with mock.patch.object(self.panel, 'LOGS_DIR', self.tmp):
+                self.mgr.start(self.serial)
+        self.addCleanup(self.mgr.log_files[self.serial].close)
+        session = next(p for p in self.stats_for()['periods'] if p['key'] == 'session')
+        self.assertFalse(session['unknown'])
+        self.assertIsNotNone(self.mgr.session_start(self.serial))
+
+    def test_no_history_is_zeroes_not_an_error(self):
+        out = self.stats_for()
+        self.assertEqual(out['hands_total'], 0)
+        self.assertIsNone(out['live'])
+        self.assertEqual(out['chart'], [])
+
+    def test_the_history_file_is_read_once_per_change(self):
+        """Панель опрашивается раз в 3 секунды — разбирать историю каждый раз незачем."""
+        self.write_hands(50.0, 55.0)
+        with mock.patch.object(self.stats, 'load_hands',
+                               wraps=self.stats.load_hands) as load:
+            self.stats_for()
+            self.stats_for()
+            self.assertEqual(load.call_count, 1, 'файл не менялся — второй разбор лишний')
+            self.write_hands(50.0, 55.0, 53.0)
+            os.utime(self.history, (0, os.stat(self.history).st_mtime + 10))
+            self.stats_for()
+            self.assertEqual(load.call_count, 2, 'бот дописал — перечитали')
+
+    def test_every_flag_lands_in_exactly_one_group(self):
+        """Иначе галочка потеряется: вкладка «Настройки» рисует их только по группам."""
+        grouped = [k for _, keys in self.panel.FLAG_GROUPS for k in keys]
+        self.assertEqual(sorted(grouped), sorted(set(grouped)), 'ключ в двух группах')
+        known = set(self.panel.FLAG_KEYS) | set(self.panel.BOT_FLAG_KEYS)
+        self.assertEqual(set(grouped), known, 'галочка без группы или группа без галочки')
+
+    def test_every_style_card_has_a_description(self):
+        for key, style in self.mgr.styles().items():
+            self.assertTrue(style['title'], key)
+            self.assertTrue(style['note'], f'у стиля {key} нет описания для карточки')
+
+    def test_new_tips_are_served_to_the_page(self):
+        for key in ('bb_value', 'stats', 'streak'):
+            self.assertIn(key, self.panel.TIPS)
+
+
+class HttpRoutesTest(unittest.TestCase):
+    """Роуты живьём: страница и /api/stats отвечают по HTTP."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='clubgg_http_')
+        import panel
+        self.panel = panel
+        patcher = mock.patch.object(panel, 'DEVICES_FILE',
+                                    os.path.join(self.tmp, 'devices.json'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mgr = panel.BotManager()
+        online = mock.patch.object(self.mgr, 'adb_online', return_value=[])
+        online.start()
+        self.addCleanup(online.stop)
+        manager = mock.patch.object(panel, 'MANAGER', self.mgr)
+        manager.start()
+        self.addCleanup(manager.stop)
+        self.server = panel.PanelServer(('127.0.0.1', 0), panel.Handler)
+        self.addCleanup(self.server.server_close)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_address[1]
+
+    def get(self, path):
+        with urlopen(f'http://127.0.0.1:{self.port}{path}', timeout=5) as r:
+            body = r.read().decode('utf-8')
+        return json.loads(body) if path.startswith('/api/') else body
+
+    def test_the_page_opens_and_has_all_four_tabs(self):
+        page = self.get('/')
+        for tab in ('game', 'setup', 'opps', 'stats'):
+            self.assertIn(f'data-tab="{tab}"', page)
+        self.assertIn('/api/stats', page, 'страница ходит за статистикой')
+
+    def test_stats_route_answers_for_the_first_device(self):
+        out = self.get('/api/stats')
+        self.assertEqual(out['serial'], self.mgr.devices[0]['serial'])
+        self.assertIn('periods', out)
+        self.assertIn('bb_value', out)
+        self.assertIn('stack_chips', out)
+
+    def test_stats_route_takes_a_serial(self):
+        serial = self.mgr.devices[0]['serial']
+        self.assertEqual(self.get(f'/api/stats?serial={serial}')['serial'], serial)
+
+    def test_a_bad_limit_does_not_break_the_route(self):
+        for limit in ('abc', '-5', '999999', ''):
+            self.assertIn('chart', self.get(f'/api/stats?limit={limit}'))
+
+    def test_devices_route_still_serves_the_old_keys(self):
+        """Редизайн не должен ломать то, что уже отдавалось."""
+        out = self.get('/api/devices')
+        for key in ('devices', 'charts', 'styles', 'flags', 'sliders', 'timings',
+                    'tips', 'total', 'groups'):
+            self.assertIn(key, out)
+        self.assertIn('bb_value', out['devices'][0])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
