@@ -57,6 +57,57 @@ class DeltaTest(unittest.TestCase):
         self.assertEqual(hands[0]['result'], 'loss')
         self.assertEqual(hands[0]['delta_bb'], -1.0)
 
+    def test_preflop_fold_is_not_a_loss(self):
+        """Живой кейс: фолд на префлопе без вложений — «не сыграно», не поражение.
+
+        Бот заплатил только блайнд (дельту видно), но руку не играл — в
+        винрейт такая раздача не входит.
+        """
+        hands = to_hands([
+            rec(1, 50.0, action='fold', street='preflop'),
+            rec(2, 49.0, action='call', street='preflop'),
+            rec(3, 54.0, action='call', street='preflop'),
+        ])
+        self.assertEqual(hands[0]['result'], 'folded')
+        self.assertEqual(hands[0]['delta_bb'], -1.0)     # блайнд всё равно в дельте
+        self.assertEqual(hands[1]['result'], 'win')
+
+    def test_fold_after_voluntary_call_is_a_loss(self):
+        """Коллил, потом скинул — руку играл, это поражение."""
+        hands = to_hands([
+            rec(1, 50.0, action='call', street='preflop'),
+            rec(1, 50.0, action='fold', street='turn'),
+            rec(2, 45.0, action='call', street='preflop'),
+        ])
+        self.assertEqual(hands[0]['result'], 'loss')
+
+    def test_check_bb_only_is_folded(self):
+        """Бесплатный чек в BB и фолд позже — руку не играл (нет вложений)."""
+        hands = to_hands([
+            rec(1, 50.0, action='check', street='preflop'),
+            rec(1, 50.0, action='fold', street='flop'),
+            rec(2, 49.0, action='call', street='preflop'),
+        ])
+        self.assertEqual(hands[0]['result'], 'folded')
+
+    def test_aggregate_counts_folded_separately(self):
+        """Фолды префлоп не входят в винрейт, но блайнды — в полный P/L."""
+        hands = to_hands([
+            rec(1, 50.0, action='fold', street='preflop'),   # folded, -1
+            rec(2, 49.0, action='call', street='preflop'),   # win, +5
+            rec(3, 54.0, action='call', street='preflop'),   # играл,
+            rec(3, 54.0, action='fold', street='turn'),      #  сфолдил: loss, -4
+            rec(4, 50.0, action='call', street='preflop'),
+        ])
+        agg = stats.aggregate(hands)
+        self.assertEqual(agg['hands'], 2)          # сыграно: win + loss
+        self.assertEqual(agg['folded'], 1)
+        self.assertEqual(agg['wins'], 1)
+        self.assertEqual(agg['losses'], 1)
+        self.assertEqual(agg['win_pct'], 50)
+        self.assertEqual(agg['pl_bb'], 0.0)        # -1 (блайнд) +5 -4 = 0
+        self.assertEqual(agg['pl_played_bb'], 1.0) # только сыгранные: +5-4
+
     def test_a_rebuy_is_not_a_win(self):
         """Стек вырос вшестеро — это докупка фишек, а не выигранный банк."""
         hands = hands_from(10.0, 100.0, 100.0)

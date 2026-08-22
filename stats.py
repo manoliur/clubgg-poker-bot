@@ -133,10 +133,26 @@ def group_hands(records):
     return hands
 
 
+def _voluntary(hand):
+    """Вкладывался ли бот в раздачу добровольно.
+
+    Фолд на префлопе (или чек без колла/рейза) — это НЕ поражение: бот не
+    играл руку деньгами, заплатил только блайнды. Такие раздачи считаются
+    «не сыграно» и не портят винрейт (живой кейс пользователя: префлоп-фолды
+    не должны считаться поражениями). Чек — не вложение: чек-BB-фолд на
+    флопе — тоже «не сыграно».
+    """
+    for rec in hand['records']:
+        if rec.get('action') in ('call', 'raise'):
+            return True
+    return False
+
+
 def fill_results(hands):
     """Проставить каждой раздаче результат: stack_out, delta_bb, result.
 
     result: 'win' | 'loss' | 'push' (сыграна вничью, без вложений) |
+            'folded' (не сыграна: фолд на префлопе без добровольных вложений) |
             'open' (результат ещё не известен — это последняя раздача) |
             'skip' (докупка/смена стола: разница не могла получиться из игры).
     """
@@ -157,6 +173,9 @@ def fill_results(hands):
         hand['delta_bb'] = round(delta, 2)
         hand['result'] = ('win' if delta > EPS_BB else
                           'loss' if delta < -EPS_BB else 'push')
+        if not _voluntary(hand):
+            # фолд на префлопе: блайнды уже в дельте, но это не поражение
+            hand['result'] = 'folded'
     return hands
 
 
@@ -215,18 +234,24 @@ def aggregate(hands, since=None, bb_value=BB_VALUE_DEFAULT):
     """Сводка по раздачам: сколько сыграно, выиграно, проиграно и на сколько фишек.
 
     since — datetime, с которого считаем (None = за всё время).
+    'folded' (фолд на префлопе без вложений) — не поражение: в винрейт не
+    входит, но блайнды таких раздач честно учтены в pl_bb (полный P/L).
     """
-    rows = counted(hands)
+    all_rows = [h for h in hands if h.get('result') in ('win', 'loss', 'push', 'folded')]
     if since is not None:
-        rows = [h for h in rows if h['time'] is not None and h['time'] >= since]
+        all_rows = [h for h in all_rows if h['time'] is not None and h['time'] >= since]
+    rows = [h for h in all_rows if h.get('result') in ('win', 'loss', 'push')]
+    folded = [h for h in all_rows if h.get('result') == 'folded']
     wins = [h for h in rows if h['result'] == 'win']
     losses = [h for h in rows if h['result'] == 'loss']
     total = len(rows)
-    pl_bb = round(sum(h['delta_bb'] for h in rows), 2) if rows else 0.0
+    pl_bb = round(sum(h['delta_bb'] for h in all_rows), 2) if all_rows else 0.0
+    pl_played_bb = round(sum(h['delta_bb'] for h in rows), 2) if rows else 0.0
     best = max((h['delta_bb'] for h in wins), default=0.0)
     worst = min((h['delta_bb'] for h in losses), default=0.0)
     return {
         'hands': total,
+        'folded': len(folded),
         'wins': len(wins),
         'losses': len(losses),
         'pushes': total - len(wins) - len(losses),
@@ -234,6 +259,8 @@ def aggregate(hands, since=None, bb_value=BB_VALUE_DEFAULT):
         'loss_pct': round(100.0 * len(losses) / total) if total else 0,
         'pl_bb': pl_bb,
         'pl_chips': to_chips(pl_bb, bb_value),
+        'pl_played_bb': pl_played_bb,
+        'pl_played_chips': to_chips(pl_played_bb, bb_value),
         'best_bb': best,
         'best_chips': to_chips(best, bb_value),
         'worst_bb': worst,

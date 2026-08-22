@@ -890,11 +890,12 @@ function periodCard(p){
   const body = p.unknown
    ? `<div class="pl muted">—</div><div class="prow">бот ещё не запускался из панели</div>`
    : `<div class="pl ${cls(p.pl_chips)}">${sgn(p.pl_chips)}<span class="coin">🪙</span></div>
-      <div class="prow">Раздач <b>${p.hands}</b></div>
+      <div class="prow">Раздач <b>${p.hands}</b>${p.folded?` · не сыграно ${p.folded}`:''}</div>
       <div class="prow"><b class="up">${p.wins}</b> побед (${p.win_pct}%) ·
        <b class="down">${p.losses}</b> поражений (${p.loss_pct}%)</div>
       <div class="prow">${streakText(st)}</div>
-      <div class="prow bbline">${p.pl_bb>0?'+':''}${p.pl_bb} ББ</div>`;
+      <div class="prow bbline">${p.pl_bb>0?'+':''}${p.pl_bb} ББ${p.folded?
+        ` (сыгранных ${p.pl_played_bb>0?'+':''}${p.pl_played_bb})`:''}</div>`;
   return `<div class="pcard"><div class="ptitle">${esc(p.title)}
     <span class="pnote">${esc(p.note||'')}</span></div>${body}</div>`;
 }
