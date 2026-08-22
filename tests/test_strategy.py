@@ -346,6 +346,52 @@ class BigOpenTest(unittest.TestCase):
         self.assertIn(d['action'], ('call', 'raise'), d['reason'])
 
 
+class HeadsUpReraiseTest(unittest.TestCase):
+    """Мин-рейз поверх нашего открытия — это 3-бет, а не «крупное открытие».
+
+    Живая раздача #4 от 22.08: в хедз-апе 3-бетят в 3.0-3.5ББ, порога «1.6
+    открытия» (4ББ) такой ререйз не добирал. Бот принимал его за открытие,
+    применял диапазон 3-бета и с AQo поднимал ТРИЖДЫ подряд — 4-бет и 5-бет
+    против диапазона QQ+/AK, банк 35ББ. Теперь после НАШЕГО рейза ререйзом
+    считается любая доплата дороже открытия.
+    """
+
+    def hand(self, hole, to_call, **kw):
+        base = {'hole': hole, 'position': 'SB', 'players': 2, 'players_seated': 2,
+                'has_bet': True, 'to_call_bb': to_call, 'pot_bb': to_call + 5.0,
+                'hero_raised': True}
+        base.update(kw)
+        return st.decide(state(**base), stack_bb=100.0)
+
+    def test_a_min_reraise_folds_out_the_three_bet_range(self):
+        """AQo и TT — руки диапазона 3-бета, но против ререйза они пасуют."""
+        for hole in (['Ah', 'Qd'], ['Th', 'Td'], ['Kh', 'Qh']):
+            with self.subTest(hole=hole):
+                d = self.hand(hole, 3.0)
+                self.assertEqual(d['action'], 'fold', d['reason'])
+                self.assertIn('против 3-бета+', d['reason'])
+                self.assertNotIn('3-бет на велью', d['reason'])
+
+    def test_monsters_four_bet_the_min_reraise(self):
+        for hole in (['Qh', 'Qd'], ['Ah', 'Kd'], ['Ah', 'Ad']):
+            with self.subTest(hole=hole):
+                d = self.hand(hole, 3.0)
+                self.assertEqual(d['action'], 'raise', d['reason'])
+                self.assertIn('4-бет', d['reason'])
+
+    def test_a_bare_min_reraise_counts_too(self):
+        """Наши 2.5 -> его 5.0: доплата ровно в открытие — это тоже 3-бет."""
+        d = self.hand(['Ah', 'Qd'], st.OPEN_SIZE_BB)
+        self.assertEqual(d['action'], 'fold', d['reason'])
+        self.assertIn('против 3-бета+', d['reason'])
+
+    def test_without_our_raise_the_same_bet_is_just_an_open(self):
+        """Мы не поднимали — 3.0ББ перед нами это открытие, диапазоны прежние."""
+        d = self.hand(['Th', 'Td'], 3.0, hero_raised=False, pot_bb=4.5)
+        self.assertNotIn('против 3-бета+', d['reason'])
+        self.assertIn(d['action'], ('call', 'raise'), d['reason'])
+
+
 class PreflopMoneyTest(unittest.TestCase):
     """Что бот вычитает из банка: сколько вложено до нашего хода и кем."""
 
