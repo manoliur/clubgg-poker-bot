@@ -86,6 +86,44 @@ FLAG_KEYS = [f[0] for f in FLAGS]
 # ---------------------------------------------------------------------------
 # процессы ботов
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Подсказки для панели — простыми словами, без покерного жаргона.
+# ---------------------------------------------------------------------------
+TIPS = {
+    'chart': 'Таблица правил игры: какие руки разыгрывать с каждой позиции за столом. Можно загрузить свою.',
+    'style': 'Готовый характер игры. Тайтовый — мало рук, осторожно. Стандартный — сбалансированно. Агрессивный — чаще и крупнее ставит. Лузовый — играет много рук.',
+    'stack': 'Сколько «больших ставок» у бота (1 ББ = две малые ставки). Нужно боту для расчётов. Обычно бот следит за своим стеком сам.',
+    'aggression': 'Общая смелость бота: больше — крупнее ставки и чаще повышения. 1.0 — как задумано, 1.5 — заметно агрессивнее.',
+    'defense': 'Готовность бота отвечать на ставки оппонента: больше — чаще коллит, меньше — чаще сбрасывает карты.',
+    'bet_sizing': 'Разные размеры ставок по силе руки: с сильной — крупнее, со слабой — меньше. Выкл — всегда ставка около половины банка.',
+    'multiway_tight': 'Когда в раздаче 3 и больше игроков, бот играет осторожнее: не блефует, реже ставит, коллит только выгодные ставки.',
+    'short_stack_mode': 'Когда у бота мало фишек (меньше порога «Короткий стек, ББ»), он играет проще: идёт ва-банк с сильными руками вместо обычных ставок.',
+    'blocker_bluff': 'Блеф на последней карте, когда карты бота мешают оппоненту собрать самую сильную комбинацию (например, у нас туз масти — значит, у оппонента не может быть тузового флеша).',
+    'position_aware': 'Бот учитывает, кто ходит первым. Когда он ходит первым (без позиции) — реже ставит со средними руками.',
+    'live_stack': 'Бот сам читает свой стек фишек с экрана и обновляет число в панели. Выкл — стек задаётся вручную.',
+    'opponent_memory': 'Бот запоминает оппонентов: как часто они играют, повышают ставки — и подстраивается под них. Выкл — играет только по своим картам.',
+    'human_timing': 'Бот «думает» перед ходом, как человек: перед крупной ставкой — дольше, перед сбросом — быстро. Выкл — действует мгновенно.',
+    'read_nicks': 'Бот читает ники оппонентов с экрана, чтобы вести статистику по конкретным игрокам, а не по местам за столом.',
+    'cbet_pot': 'Размер обычной ставки бота с сильной рукой после флопа (в долях банка).',
+    'nuts_pot': 'Размер ставки с самой сильной возможной комбинацией (в долях банка).',
+    'medium_max_price': 'Самая дорогая ставка, на которую бот ещё отвечает со средней рукой. Больше — чаще коллит средними руками.',
+    'draw_min_equity': 'Насколько выгодно боту ждать доборную карту (флеш/стрит). Больше — реже ждёт, чаще сбрасывает.',
+    'short_stack_bb': 'Граница «короткого стека»: сколько больших ставок должно остаться, чтобы бот перешёл в режим ва-банка.',
+    'bet_nuts': 'Размер ставки с самой сильной комбинацией (в долях банка) — при включённом «Размере ставок».',
+    'bet_strong': 'Размер ставки с сильной комбинацией (в долях банка) — при включённом «Размере ставок».',
+    'bet_medium': 'Размер ставки со средней комбинацией (в долях банка) — при включённом «Размере ставок».',
+    'bet_draw': 'Размер ставки, когда бот ждёт доборную карту (в долях банка) — при включённом «Размере ставок».',
+    'min_hands_vpip': 'Сколько раздач нужно понаблюдать, чтобы бот начал использовать статистику «как часто оппонент играет».',
+    'min_hands_pfr': 'Сколько раздач нужно для статистики «как часто оппонент повышает ставку до флопа».',
+    'min_hands_three_bet': 'Сколько раздач нужно для статистики «как часто оппонент повышает повторно, когда уже кто-то повысил».',
+    'min_hands_agg': 'Сколько раздач нужно для статистики «как часто оппонент ставит сам, а не просто отвечает».',
+    'vpip': 'Как часто оппонент вступает в игру (в процентах раздач). Чем больше — тем «лузовее» он играет.',
+    'pfr': 'Как часто оппонент повышает ставку до появления общих карт. Показывает его агрессию на раннем этапе.',
+    'three_bet': 'Как часто оппонент повышает повторно, когда кто-то уже повысил до него.',
+    'agg': 'Во сколько раз чаще оппонент ставит сам, чем просто отвечает на чужие ставки. Больше — агрессивнее.',
+    'timing': 'Сколько секунд бот «думает» перед ходом: перед повышением дольше, перед сбросом быстро. Пауза не больше 5 секунд и только когда есть запас времени.',
+}
+
 class BotManager:
     _mtime = None             # mtime devices.json на момент последнего чтения/записи
 
@@ -204,6 +242,7 @@ class BotManager:
         if isinstance(p, int):                 # подхваченный по pid
             return self._pid_alive(p)
         return p is not None and p.poll() is None
+
 
     def status(self, serial):
         self.reload_if_changed()      # бот мог обновить свой стек в файле
@@ -431,6 +470,13 @@ PAGE = """<!DOCTYPE html>
  .opps td.raw{color:#5b6a7d}
  .flags label{color:#e8e8e8;display:flex;gap:6px;align-items:center;cursor:pointer}
  .dirty{color:#ffd75e}
+.tip{position:relative;display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+ font-size:10px;font-weight:bold;border-radius:50%;background:#3a4a5c;color:#c8d8e8;cursor:help;flex:none}
+.tip .tt{display:none;position:absolute;bottom:140%;left:50%;transform:translateX(-50%);width:270px;
+ background:#0c1014;border:1px solid #3a4a5c;border-radius:8px;padding:8px 10px;font-size:12px;
+ color:#e8e8e8;z-index:50;white-space:normal;text-align:left;box-shadow:0 4px 14px rgba(0,0,0,.5)}
+.tip:hover .tt{display:block}
+.flags .tip{margin-left:2px}
 </style></head><body><div class="wrap">
 <h1>🎰 ClubGG — панель управления ботами</h1>
 <div id="list"></div>
@@ -450,6 +496,9 @@ function pct(x){ return Math.round((x||0)*100)+'%'; }
 // показывает бледной, чтобы её не читали как вывод об оппоненте
 function raw(o, m){ return ((o.ready||{})[m]) ? '' :
   ' class="raw" title="наблюдений мало — метрика не применяется"'; }
+// значок «?» с подсказкой простыми словами (data.tips — словарь с сервера)
+function tip(k, data){ const t = (data.tips||{})[k]; return t ?
+  `<span class="tip">?<span class="tt">${esc(t)}</span></span>` : ''; }
 async function refresh(){
   if (editing) return;       // иначе автообновление сотрёт несохранённые правки
   const data = await api('/api/devices');
@@ -458,25 +507,25 @@ async function refresh(){
    <div class="dev" data-serial="${d.serial}"><h2>${esc(d.name)||d.serial}
      <span class="badge ${d.online?'on':'off'}">${d.online?'в сети':'нет связи'}</span>
      <span class="badge ${d.running?'on':'off'}">${d.running?'ИГРАЕТ':'остановлен'}</span></h2>
-   <div class="row"><label>Чарт</label>
+   <div class="row"><label>Чарт ${tip('chart',data)}</label>
      <select data-k="chart">${(data.charts||[]).map(c =>
        `<option ${d.chart==='charts/'+c?'selected':''}>charts/${c}</option>`).join('')}</select>
-     <label>Стиль</label>
+     <label>Стиль ${tip('style',data)}</label>
      <select data-k="style">${Object.entries(data.styles||{}).map(([k,s]) =>
        `<option value="${k}" ${d.style===k?'selected':''}>${s.title}</option>`).join('')}</select>
-     <label>Стек, ББ</label><input type="number" data-k="stack" step="0.1" value="${d.stack}" style="width:70px">
+     <label>Стек, ББ ${tip('stack',data)}</label><input type="number" data-k="stack" step="0.1" value="${d.stack}" style="width:70px">
      <span class="hint auto">${d.stack_auto?`стек: ${d.stack} ББ (авто)`:'стек задан вручную'}</span>
    </div>
    <div class="row">
-     <label>Агрессия</label><input type="range" data-k="aggression" min="0.5" max="2" step="0.1" value="${d.aggression}">
+     <label>Агрессия ${tip('aggression',data)}</label><input type="range" data-k="aggression" min="0.5" max="2" step="0.1" value="${d.aggression}">
      <span class="val">${d.aggression}</span>
-     <label>Защита</label><input type="range" data-k="defense" min="0.5" max="2" step="0.1" value="${d.defense}">
+     <label>Защита ${tip('defense',data)}</label><input type="range" data-k="defense" min="0.5" max="2" step="0.1" value="${d.defense}">
      <span class="val">${d.defense}</span>
    </div>
    <div class="row flags grid">${(data.flags||[]).map(([k,title]) =>
-     `<label><input type="checkbox" data-k="${k}" ${d.flags[k]?'checked':''}>${title}</label>`).join('')}</div>
+     `<label><input type="checkbox" data-k="${k}" ${d.flags[k]?'checked':''}>${title}${tip(k,data)}</label>`).join('')}</div>
    <div class="grid">${(data.sliders||[]).map(([k,title,lo,hi,step]) =>
-     `<div class="cell"><label>${title}</label>
+     `<div class="cell"><label>${title}${tip(k,data)}</label>
        <input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${step}" value="${d.sliders[k]}">
        <span class="val">${d.sliders[k]}</span></div>`).join('')}</div>
    <div class="hint">Паузы перед ходом: ${Object.entries(d.timing||{}).map(([k,v]) =>
@@ -484,7 +533,7 @@ async function refresh(){
      не больше 5с на ход и только когда есть запас до таймаута; диапазоны правятся
      в devices.json)</div>
    <div class="opps"><b>Оппоненты</b>${(d.opponents||[]).length ? `<table>
-     <tr><th>Имя</th><th>Рук</th><th>VPIP</th><th>PFR</th><th>3-бет</th><th>Agg</th></tr>
+     <tr><th>Имя</th><th>Рук</th><th>VPIP ${tip('vpip',data)}</th><th>PFR ${tip('pfr',data)}</th><th>3-бет ${tip('three_bet',data)}</th><th>Agg ${tip('agg',data)}</th></tr>
      ${d.opponents.map(o => `<tr><td>${esc(o.name)}</td><td>${o.hands}</td>
        <td${raw(o,'vpip')}>${pct(o.vpip)}</td><td${raw(o,'pfr')}>${pct(o.pfr)}</td>
        <td${raw(o,'three_bet')}>${pct(o.three_bet)}</td>
@@ -571,7 +620,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {'devices': devices, 'charts': MANAGER.charts(),
                              'styles': MANAGER.styles(), 'flags': FLAGS + BOT_FLAGS,
                              'sliders': SLIDERS, 'timings': TIMING_TITLES,
-                             'total': len(devices)})
+                             'tips': TIPS, 'total': len(devices)})
             return
         self._send(404, {'error': 'not found'})
 
