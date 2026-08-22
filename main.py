@@ -33,9 +33,10 @@ import strategy
 
 # масти для живого лога: 'Ah' -> 'A♥'
 SUIT_SIGNS = {'s': '♠', 'h': '♥', 'd': '♦', 'c': '♣'}
-# действие -> диапазон задержки в devices.json (см. config.TIMING_DEFAULTS)
+# действие -> диапазон задержки в devices.json (см. config.TIMING_DEFAULTS).
+# Чека здесь нет: он бесплатный и всегда быстрый (config.TIMING_CHECK).
 TIMING_KEYS = {'raise': 'timing_raise', 'call': 'timing_call',
-               'check': 'timing_fold', 'fold': 'timing_fold'}
+               'fold': 'timing_fold'}
 MADE_TITLES = {'preflop': 'префлоп', 'unknown': 'не разобрана'}
 
 
@@ -578,6 +579,15 @@ class Bot:
         return rows
 
     # ---------- человечные тайминги ----------
+    def invested(self):
+        """Вкладывали ли мы в эту раздачу деньги добровольно (колл или рейз).
+
+        Блайнд не в счёт: его ставят за нас. Смотрим на свою линию в раздаче —
+        если на какой-то улице мы коллировали или поднимали, рука «наша», и
+        сбросить её человек думает пару мгновений.
+        """
+        return any(a in ('call', 'raise') for a in self._line_acted.values())
+
     def human_delay(self, action, elapsed=0.0):
         """Сколько «думать» перед тапом, секунд. 0 — тапаем сразу.
 
@@ -585,12 +595,25 @@ class Bot:
         если кнопки висят давно (раскрывали столбец, перечитывали карты, ход
         вернулся после долгих раздумий оппонента), задержка не добавляется —
         проиграть ход по таймауту хуже, чем выглядеть роботом.
+
+        По той же причине рутина идёт быстрым путём: фолд рукой, в которую мы
+        ничего не вложили, — сразу, чек — короткая пауза без джиттера. Тянуть
+        там нечего (человек за столом жмёт «Фолд» вне диапазона не думая), а
+        каждая лишняя секунда на сотне раздач — это потерянные ходы.
         """
         if not self.human_timing:
             return 0.0
-        lo, hi = self.timing[TIMING_KEYS.get(action, 'timing_fold')]
-        delay = random.uniform(lo, hi) + random.uniform(-config.TIMING_JITTER,
-                                                        config.TIMING_JITTER)
+        if action == 'fold' and not self.invested():
+            return 0.0
+        if action == 'check':
+            lo, hi = config.TIMING_CHECK
+        else:
+            lo, hi = self.timing[TIMING_KEYS.get(action, 'timing_fold')]
+        delay = random.uniform(lo, hi)
+        if action in ('raise', 'call'):
+            # джиттер — только там, где бот и правда думает: у чека и фолда
+            # диапазон и так меньше секунды, растягивать его нечем
+            delay += random.uniform(-config.TIMING_JITTER, config.TIMING_JITTER)
         delay = min(max(delay, 0.0), config.TIMING_MAX)
         budget = config.TURN_BUDGET - config.TURN_RESERVE - max(0.0, elapsed)
         return round(max(0.0, min(delay, budget)), 2)
@@ -599,8 +622,11 @@ class Bot:
         """Пауза перед тапом. Возвращает, сколько реально прождали."""
         elapsed = time.time() - self._turn_seen if self._turn_seen else 0.0
         delay = self.human_delay(action, elapsed)
-        if self.human_timing and not delay and elapsed > 1.0:
-            self.log(f'ход на экране уже {elapsed:.0f}с — тапаю сразу, без паузы')
+        if self.human_timing and not delay:
+            if action == 'fold' and not self.invested():
+                self.log('фолд без вложений — тап сразу')
+            elif elapsed > 1.0:
+                self.log(f'ход на экране уже {elapsed:.0f}с — тапаю сразу, без паузы')
         if delay:
             time.sleep(delay)
         return delay

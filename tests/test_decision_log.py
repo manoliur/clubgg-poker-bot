@@ -57,9 +57,11 @@ class DecisionLogTest(unittest.TestCase):
                    history_path=os.path.join(self.tmp, 'h.jsonl'), cfg=cfg)
 
     def play(self, bot, **kw):
+        """Ход и строка решения из лога (после неё бот пишет и про тайминг)."""
         entry = bot.step(state=state(**kw))
         with open(bot.log_path, encoding='utf-8') as f:
-            return entry, f.read().strip().splitlines()[-1]
+            lines = [ln for ln in f.read().strip().splitlines() if 'решение:' in ln]
+        return entry, lines[-1]
 
     def test_pretty_cards(self):
         self.assertEqual(pretty_cards(['As', 'Qh']), 'A♠Q♥')

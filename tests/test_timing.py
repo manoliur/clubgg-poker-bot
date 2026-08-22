@@ -23,7 +23,9 @@ class StubScreen:
         self.taps.append((x, y))
 
 
-class TimingTest(unittest.TestCase):
+class TimingHarness:
+    """Бот с заглушкой экрана и выборка задержек по действию."""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='clubgg_timing_')
 
@@ -36,6 +38,8 @@ class TimingTest(unittest.TestCase):
     def samples(self, bot, action, n=200, elapsed=0.0):
         return [bot.human_delay(action, elapsed) for _ in range(n)]
 
+
+class TimingTest(TimingHarness, unittest.TestCase):
     def test_raise_thinks_longer_than_check(self):
         bot = self.bot()
         raises = self.samples(bot, 'raise')
@@ -111,6 +115,77 @@ class TimingTest(unittest.TestCase):
         bot.apply_config({'human_timing': False}, quiet=True)
         self.assertFalse(bot.human_timing)
         self.assertEqual(bot.think('raise'), 0.0)
+
+
+class FastFoldTest(TimingHarness, unittest.TestCase):
+    """Рутина делается мгновенно: чек и сброс руки, в которую мы не вкладывались."""
+
+    def think(self, bot, action):
+        """think() без настоящего сна: возвращает, сколько бот собирался ждать."""
+        with mock.patch.object(main_mod.time, 'sleep') as sleep:
+            waited = bot.think(action)
+        self.assertEqual(sleep.call_count, 1 if waited else 0)
+        return waited
+
+    def test_fold_without_investment_is_instant(self):
+        bot = self.bot()
+        self.assertEqual(set(self.samples(bot, 'fold')), {0.0})
+        self.assertEqual(self.think(bot, 'fold'), 0.0)
+        with open(bot.log_path, encoding='utf-8') as f:
+            self.assertIn('фолд без вложений — тап сразу', f.read())
+
+    def test_fold_after_checks_is_instant_too(self):
+        """Чек-чек и сброс на общих картах — денег в банке наших нет."""
+        bot = self.bot()
+        bot._line_acted = {'preflop': 'check', 'flop': 'check'}
+        self.assertEqual(set(self.samples(bot, 'fold')), {0.0})
+
+    def test_fold_after_investment_is_short_but_not_zero(self):
+        for line in ({'preflop': 'call'}, {'preflop': 'raise', 'flop': 'check'}):
+            with self.subTest(line=line):
+                bot = self.bot()
+                bot._line_acted = dict(line)
+                values = self.samples(bot, 'fold')
+                self.assertGreater(max(values), 0.0)
+                self.assertGreaterEqual(min(values), 0.0)
+                self.assertLessEqual(max(values), 0.45)
+
+    def test_check_is_a_blink(self):
+        bot = self.bot()
+        values = self.samples(bot, 'check')
+        self.assertGreaterEqual(min(values), 0.05)
+        self.assertLessEqual(max(values), 0.3)
+
+    def test_check_ignores_a_widened_fold_range(self):
+        """Диапазон фолда правится в панели, чек всегда мгновенный."""
+        bot = self.bot(timing_fold=[3.0, 4.0])
+        self.assertLessEqual(max(self.samples(bot, 'check')), 0.3)
+
+    def test_raise_is_untouched(self):
+        bot = self.bot()
+        lo, hi = config.TIMING_DEFAULTS['timing_raise']
+        values = self.samples(bot, 'raise')
+        self.assertGreaterEqual(min(values), lo - config.TIMING_JITTER)
+        self.assertLessEqual(max(values), hi + config.TIMING_JITTER)
+        self.assertGreater(min(values), 0.0)
+
+    def test_flag_off_kills_the_fast_paths_too(self):
+        bot = self.bot()
+        bot._line_acted = {'preflop': 'call'}
+        bot.apply_config({'human_timing': False}, quiet=True)
+        for action in ('fold', 'check', 'call', 'raise'):
+            with self.subTest(action=action):
+                self.assertEqual(set(self.samples(bot, action)), {0.0})
+
+    def test_budget_still_wins_over_the_fast_paths(self):
+        """Кнопки висят дольше бюджета — ни чек, ни фолд паузу не добавляют."""
+        bot = self.bot()
+        bot._line_acted = {'preflop': 'call'}
+        late = config.TURN_BUDGET - config.TURN_RESERVE + 1
+        for action in ('check', 'fold'):
+            with self.subTest(action=action):
+                self.assertEqual(set(self.samples(bot, action, n=20, elapsed=late)),
+                                 {0.0})
 
 
 class BotHarness:
